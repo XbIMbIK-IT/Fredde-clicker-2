@@ -79,3 +79,7 @@ class Fredde:
             return True
 
         return False
+
+    def step():
+        if self.check_death():
+            age += 1
