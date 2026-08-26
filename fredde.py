@@ -1,6 +1,9 @@
 import random
+from Paddock import Paddock
 
 MAX_AGE = 25
+
+STANDART_PADDOCK = Paddock(max_freds=99999)
 
 with open("NameList.txt", "r", encoding="utf-8") as f:
     NAME_LIST = f.read().splitlines()
@@ -11,6 +14,7 @@ class Fredde:
     def __init__(
         self,
         name=None,
+        paddock=STANDART_PADDOCK
         age=1,
         gender='is', #boy, girl, is (intersex), cf (childfree)
         genid=1,
@@ -47,7 +51,12 @@ class Fredde:
         self.eyelash = eyelash
         self.max_age = MAX_AGE * (1 - self.mutrate / 100)
 
+        self._paddock = paddock
+        paddock.add(self)
+
         freddies.append(self)
+
+    
         
     @property
     def family(self):
