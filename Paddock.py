@@ -2,8 +2,10 @@
 paddocks = []
 
 class Paddock:
-    def __init__(self, max_freds=5):
+    def __init__(self, time=True, max_freds=5):
         paddocks.append(self)
+
+        self.time = time
         self.max_freds = max_freds
 
     def add(self, fred):
@@ -27,5 +29,8 @@ class Paddock:
             
 
     def step(self):
+        if not self.time:
+            return
+
         for fred in self.freddies:
             feed.step()
