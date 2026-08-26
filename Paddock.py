@@ -18,5 +18,4 @@ class Paddock:
 
     def step(self):
         for fred in self.freddies:
-            if fred.check_death():
-                age += 1
+            feed.step()
