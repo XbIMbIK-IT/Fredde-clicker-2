@@ -6,5 +6,5 @@ def step():
         p.step()
 
 def move(fred, paddock):
-    old_paddock = Fred._paddock:
-    old_paddock.move(fred, paddock)
+    old_paddock = fred._paddock:
+    return old_paddock.move(fred, paddock)
