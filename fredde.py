@@ -50,9 +50,15 @@ class Fredde:
         self.bodyPattern = bodyPattern
         self.eyelash = eyelash
         self.max_age = MAX_AGE * (1 - self.mutrate / 100)
+        
+        is_added = paddock.add(self)
 
-        self._paddock = paddock
-        paddock.add(self)
+        if is_added:
+            self._paddock = paddock
+        else:
+            STANDART_PADDOCK.add(self)
+            self._paddock = STANDART_PADDOCK
+        
 
         freddies.append(self)
 
