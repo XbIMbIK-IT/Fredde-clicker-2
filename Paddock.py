@@ -10,7 +10,7 @@ class Paddock:
     """добавляет Фреда если загон не        
        полный, иначе возвращает False"""
 
-        if Len(self.freddies) == max_freds:
+        if len(self.freddies) == max_freds:
             return False
         self._freddies.append(fred)
         return True
