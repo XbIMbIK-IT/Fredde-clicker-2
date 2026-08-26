@@ -10,7 +10,6 @@ freddies = []
 class Fredde:
     def __init__(
         self,
-        alive=True,
         name=None,
         age=1,
         gender='is', #boy, girl, is (intersex), cf (childfree)
@@ -29,7 +28,7 @@ class Fredde:
         bodyPattern='basic',
         eyelash=False
     ):
-        self.alive = alive
+        self.alive = True
         self.name = name if name else random.choice(NAME_LIST)
         self.age = age
         self.color = color if color else [255, 185, 107]
