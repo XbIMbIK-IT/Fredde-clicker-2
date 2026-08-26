@@ -1,945 +1,881 @@
-import pygame
+from __future__ import annotations
+
+import argparse
+import math
 import random
-import sys
+import re
+from dataclasses import dataclass
 from pathlib import Path
 
+import pygame
+
 
 # ============================================================
-# НАСТРОЙКИ
+# PATHS AND WINDOW
 # ============================================================
+
+BASE_DIR = Path(__file__).resolve().parent
+TERRAIN_PATH = BASE_DIR / "sprites/terrain/default"
+PROP_PATH = TERRAIN_PATH / "props"
+EXPORT_PATH = BASE_DIR / "exports"
 
 WIDTH = 1920
 HEIGHT = 1080
-
 FPS = 60
 
 MAP_WIDTH = 30
 MAP_HEIGHT = 30
 
-TERRAIN_PATH = Path("sprites/terrain/default")
-PROP_PATH = Path("sprites/terrain/default/props")
-
 
 # ============================================================
-# РАЗМЕРЫ ИЗОМЕТРИЧЕСКОЙ СЕТКИ
+# ISOMETRIC GRID
 # ============================================================
-
-TILE_IMAGE_WIDTH = 1000
-TILE_IMAGE_HEIGHT = 1000
 
 TILE_STEP_X = 489
 TILE_STEP_Y = 218
+PROP_GROUND_OFFSET = 30
 
 
 # ============================================================
-# ПРОПЫ
+# GENERATION
 # ============================================================
 
-# Шанс появления пропа на каждой клетке
-PROP_CHANCE = 0.12
+# Larger values make terrain change more frequently.
+HEIGHT_NOISE_SCALE = 0.085
+MOISTURE_NOISE_SCALE = 0.105
+PROP_NOISE_SCALE = 0.16
 
-# Максимальное количество пропов
-MAX_PROPS = (MAP_HEIGHT * MAP_WIDTH)
+NOISE_OCTAVES = 5
+NOISE_LACUNARITY = 2.0
+NOISE_GAIN = 0.5
+
+DEEP_WATER_LEVEL = 0.31
+SEA_LEVEL = 0.40
+BEACH_LEVEL = 0.46
+HILL_LEVEL = 0.59
+FOREST_MOISTURE = 0.61
+
+# Makes the edges of the map sink into water.
+ISLAND_START = 0.38
+ISLAND_STRENGTH = 0.45
+
+WATER_BIOMES = frozenset({"deep_water", "water"})
 
 
 # ============================================================
-# КАМЕРА
+# DECORATIONS
 # ============================================================
 
-MIN_ZOOM = 0.15
+PROP_CHANCE_BY_BIOME = {
+    "beach": 0.025,
+    "grass": 0.11,
+    "forest": 0.24,
+    "hill": 0.07,
+}
+
+MAX_PROPS = MAP_WIDTH * MAP_HEIGHT
+
+# 0 means that the prop anchor may stand on a coastal land tile.
+# Set to 1 if large sprites must also stay one cell away from water.
+PROP_WATER_CLEARANCE = 0
+
+
+# ============================================================
+# CAMERA AND EXPORT
+# ============================================================
+
+MIN_ZOOM = 0.04
 MAX_ZOOM = 2.0
-
+START_ZOOM = 0.18
 ZOOM_SPEED = 1.15
+CAMERA_SPEED = 900.0
 
-# Камера хранится в мировых координатах
-camera_x = 0.0
-camera_y = 0.0
-
-zoom = 0.7
-
-CAMERA_SPEED = 15
-
-
-# ============================================================
-# PYGAME
-# ============================================================
-
-pygame.init()
-
-screen = pygame.display.set_mode(
-    (WIDTH, HEIGHT)
-)
-
-pygame.display.set_caption(
-    "Fredde Terrain Generator"
-)
-
-clock = pygame.time.Clock()
+# A 30x30 map is huge in native sprite resolution, so export is
+# downscaled and additionally protected by a maximum side length.
+EXPORT_SCALE = 0.25
+EXPORT_MAX_SIDE = 8192
+EXPORT_PADDING = 48
 
 
-# ============================================================
-# ЗАГРУЗКА ЛУЖАЕК
-# ============================================================
-
-tiles = []
-
-for i in range(1, 10):
-
-    path = TERRAIN_PATH / f"lujaika{i}.png"
-
-    try:
-
-        image = pygame.image.load(
-            path
-        ).convert_alpha()
-
-        tiles.append(image)
-
-        print(
-            f"Загружена лужайка: {path}"
-        )
-
-    except Exception as e:
-
-        print(
-            f"Ошибка загрузки {path}: {e}"
-        )
+def clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
 
 
-if not tiles:
+def lerp(a: float, b: float, t: float) -> float:
+    return a + (b - a) * t
 
-    print(
-        "ОШИБКА: не найдено ни одной лужайки!"
+
+def smoothstep(edge0: float, edge1: float, value: float) -> float:
+    if edge0 == edge1:
+        return float(value >= edge1)
+    t = clamp((value - edge0) / (edge1 - edge0), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def natural_key(path: Path) -> list[object]:
+    """Sorts tile2 before tile10."""
+    return [int(part) if part.isdigit() else part.casefold()
+            for part in re.split(r"(\d+)", path.name)]
+
+
+def coordinate_random(seed: int, x: int, y: int, salt: int = 0) -> float:
+    """Stable coordinate hash in the [0, 1) range."""
+    value = (
+        seed * 0x9E3779B1
+        + x * 0x85EBCA77
+        + y * 0xC2B2AE3D
+        + salt * 0x27D4EB2F
+    ) & 0xFFFFFFFF
+    value ^= value >> 16
+    value = (value * 0x7FEB352D) & 0xFFFFFFFF
+    value ^= value >> 15
+    value = (value * 0x846CA68B) & 0xFFFFFFFF
+    value ^= value >> 16
+    return value / 2**32
+
+
+class PerlinNoise2D:
+    """Small dependency-free implementation of seeded 2D Perlin noise."""
+
+    _GRADIENTS = (
+        (1.0, 0.0),
+        (-1.0, 0.0),
+        (0.0, 1.0),
+        (0.0, -1.0),
+        (0.70710678, 0.70710678),
+        (-0.70710678, 0.70710678),
+        (0.70710678, -0.70710678),
+        (-0.70710678, -0.70710678),
     )
 
-    pygame.quit()
-    sys.exit()
+    def __init__(self, seed: int):
+        permutation = list(range(256))
+        random.Random(seed).shuffle(permutation)
+        self.permutation = permutation * 2
+
+@staticmethod
+    def _fade(value: float) -> float:
+        return value * value * value * (
+            value * (value * 6.0 - 15.0) + 10.0
+        )
+
+@classmethod
+    def _dot(cls, hashed: int, x: float, y: float) -> float:
+        gx, gy = cls._GRADIENTS[hashed & 7]
+        return gx * x + gy * y
+
+    def noise(self, x: float, y: float) -> float:
+        x0 = math.floor(x)
+        y0 = math.floor(y)
+        xf = x - x0
+        yf = y - y0
+
+        xi = x0 & 255
+        yi = y0 & 255
+        p = self.permutation
+
+        aa = p[p[xi] + yi]
+        ab = p[p[xi] + yi + 1]
+        ba = p[p[xi + 1] + yi]
+        bb = p[p[xi + 1] + yi + 1]
+
+        u = self._fade(xf)
+        v = self._fade(yf)
+
+        bottom = lerp(
+            self._dot(aa, xf, yf),
+            self._dot(ba, xf - 1.0, yf),
+            u,
+        )
+        top = lerp(
+            self._dot(ab, xf, yf - 1.0),
+            self._dot(bb, xf - 1.0, yf - 1.0),
+            u,
+        )
+        return clamp(lerp(bottom, top, v) * 1.41421356, -1.0, 1.0)
+
+    def fbm( self, x: float, y: float, octaves: int = NOISE_OCTAVES, lacunarity: float = NOISE_LACUNARITY, gain: float = NOISE_GAIN, ) -> float:
+        """Fractal Brownian motion assembled from several Perlin octaves."""
+        value = 0.0
+        amplitude = 1.0
+        frequency = 1.0
+        amplitude_sum = 0.0
+
+        for _ in range(octaves):
+            value += self.noise(x * frequency, y * frequency) * amplitude
+            amplitude_sum += amplitude
+            amplitude *= gain
+            frequency *= lacunarity
+
+        normalized = value / amplitude_sum if amplitude_sum else 0.0
+        return clamp(normalized * 0.5 + 0.5, 0.0, 1.0)
 
 
-# ============================================================
-# ЗАГРУЗКА ПРОПОВ
-# ============================================================
+@dataclass(frozen=True)
+class TerrainCell:
+    biome: str
+    height: float
+    moisture: float
+    variant: int
 
-props = []
+
+@dataclass(frozen=True)
+class PropSprite:
+    name: str
+    image: pygame.Surface
 
 
-if PROP_PATH.exists():
+@dataclass(frozen=True)
+class PlacedProp:
+    x: int
+    y: int
+    sprite: PropSprite
 
-    for path in PROP_PATH.iterdir():
 
-        if not path.is_file():
-            continue
+def tint_surface( image: pygame.Surface, color: tuple[int, int, int], strength: float, ) -> pygame.Surface:
+    """Recolors a fallback tile while preserving its alpha channel."""
+    strength = clamp(strength, 0.0, 1.0)
+    multiplier = round(255 * (1.0 - strength))
+    addition = tuple(round(channel * strength) for channel in color)
 
-        if path.suffix.lower() != ".png":
-            continue
+    result = image.copy()
+    result.fill(
+        (multiplier, multiplier, multiplier),
+        special_flags=pygame.BLEND_RGB_MULT,
+    )
+    result.fill(addition, special_flags=pygame.BLEND_RGB_ADD)
+    return result
 
+
+class TerrainApp:
+    def __init__(self, seed: int | None = None):
+        pygame.init()
+        self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
+        pygame.display.set_caption("Fredde Perlin Terrain Generator")
+        self.clock = pygame.time.Clock()
+        self.font = pygame.font.SysFont("dejavusans", 22)
+
+        self.camera_x = 0.0
+        self.camera_y = 0.0
+        self.zoom = START_ZOOM
+        self.dragging = False
+        self.last_mouse_pos: tuple[int, int] | None = None
+
+        self.seed = seed if seed is not None else self.make_seed()
+        self.terrain_sprites = self.load_terrain_sprites()
+        self.props = self.load_props()
+
+        self.scaled_terrain: dict[str, list[pygame.Surface]] = {}
+        self.scaled_props: dict[str, pygame.Surface] = {}
+        self.scaled_assets_zoom: float | None = None
+
+        self.terrain_map: list[list[TerrainCell]] = []
+        self.map_props: list[PlacedProp] = []
+        self.draw_items: list[tuple[int, int, int, int, str, object]] = []
+
+        self.status_text = ""
+        self.status_until = 0
+
+        self.update_scaled_assets()
+        self.regenerate(self.seed)
+        self.center_camera()
+
+@staticmethod
+    def make_seed() -> int:
+        return random.SystemRandom().randrange(1, 2**31)
+
+@staticmethod
+    def _load_image(path: Path) -> pygame.Surface | None:
         try:
+            image = pygame.image.load(str(path)).convert_alpha()
+            print(f"Loaded: {path}")
+            return image
+        except (pygame.error, OSError) as error:
+            print(f"Cannot load {path}: {error}")
+            return None
 
-            image = pygame.image.load(
+    def load_terrain_sprites(self) -> dict[str, list[pygame.Surface]]:
+        if not TERRAIN_PATH.exists():
+            raise FileNotFoundError(f"Terrain folder not found: {TERRAIN_PATH}")
+
+        files = sorted(
+            (
                 path
-            ).convert_alpha()
-
-            props.append({
-                "name": path.stem,
-                "image": image
-            })
-
-            print(
-                f"Загружен проп: {path}"
-            )
-
-        except Exception as e:
-
-            print(
-                f"Ошибка загрузки пропа {path}: {e}"
-            )
-
-else:
-
-    print(
-        f"Папка пропов не найдена: {PROP_PATH}"
-    )
-
-
-# ============================================================
-# КЭШ ЛУЖАЕК
-# ============================================================
-
-scaled_tiles = []
-
-scaled_tiles_zoom = None
-
-
-def update_scaled_tiles():
-
-    global scaled_tiles
-    global scaled_tiles_zoom
-
-    # Если zoom не изменился,
-    # масштабировать заново не нужно
-    if scaled_tiles_zoom == zoom:
-
-        return
-
-    scaled_tiles = []
-
-    for tile in tiles:
-
-        width = max(
-            1,
-            round(
-                tile.get_width() * zoom
-            )
+                for path in TERRAIN_PATH.iterdir()
+                if path.is_file() and path.suffix.casefold() == ".png"
+            ),
+            key=natural_key,
         )
-
-        height = max(
-            1,
-            round(
-                tile.get_height() * zoom
-            )
-        )
-
-        scaled = pygame.transform.scale(
-            tile,
-            (width, height)
-        )
-
-        scaled_tiles.append(
-            scaled
-        )
-
-    scaled_tiles_zoom = zoom
-
-
-# ============================================================
-# КЭШ ПРОПОВ
-# ============================================================
-
-scaled_props = []
-
-scaled_props_zoom = None
-
-
-def update_scaled_props():
-
-    global scaled_props
-    global scaled_props_zoom
-
-    if scaled_props_zoom == zoom:
-
-        return
-
-    scaled_props = []
-
-    for prop in props:
-
-        image = prop["image"]
-
-        width = max(
-            1,
-            round(
-                image.get_width() * zoom
-            )
-        )
-
-        height = max(
-            1,
-            round(
-                image.get_height() * zoom
-            )
-        )
-
-        scaled = pygame.transform.scale(
-            image,
-            (width, height)
-        )
-
-        scaled_props.append({
-            "name": prop["name"],
-            "image": scaled
-        })
-
-    scaled_props_zoom = zoom
-
-
-# ============================================================
-# ПЕРВОНАЧАЛЬНЫЙ КЭШ
-# ============================================================
-
-update_scaled_tiles()
-update_scaled_props()
-
-
-# ============================================================
-# КАРТА
-# ============================================================
-
-terrain_map = []
-
-
-def generate_map():
-
-    global terrain_map
-
-    terrain_map = []
-
-    for y in range(MAP_HEIGHT):
-
-        row = []
-
-        for x in range(MAP_WIDTH):
-
-            tile_id = random.randrange(
-                len(tiles)
-            )
-
-            row.append(
-                tile_id
-            )
-
-        terrain_map.append(
-            row
-        )
-
-
-# ============================================================
-# ПРОПЫ НА КАРТЕ
-# ============================================================
-
-map_props = []
-
-
-def generate_props():
-
-    global map_props
-
-    map_props = []
-
-    if not props:
-
-        return
-
-    # Все клетки карты
-    cells = []
-
-    for y in range(MAP_HEIGHT):
-
-        for x in range(MAP_WIDTH):
-
-            cells.append(
-                (x+1, y+1)
-            )
-
-    # Перемешиваем клетки
-    random.shuffle(cells)
-
-    for x, y in cells:
-
-        # Проверяем шанс появления
-        if random.random() > PROP_CHANCE:
-
-            continue
-
-        # Выбираем случайный проп
-        prop = random.choice(
-            props
-        )
-
-        map_props.append({
-
-            "x": x,
-            "y": y,
-
-            "prop": prop
-
-        })
-
-        # Максимальное количество
-        if len(map_props) >= MAX_PROPS:
-
-            break
-
-
-# ============================================================
-# СОЗДАЁМ ПЕРВУЮ КАРТУ
-# ============================================================
-
-generate_map()
-generate_props()
-
-
-# ============================================================
-# WORLD -> SCREEN
-# ============================================================
-
-def world_to_screen(x, y):
-
-    # --------------------------------------------------------
-    # Положение клетки в мире
-    # --------------------------------------------------------
-
-    world_x = (
-        (x - y) * TILE_STEP_X
-    )
-
-    world_y = (
-        (x + y) * TILE_STEP_Y
-    )
-
-    # --------------------------------------------------------
-    # Переводим мировые координаты
-    # в экранные
-    # --------------------------------------------------------
-
-    screen_x = (
-        WIDTH / 2
-        + (world_x - camera_x) * zoom
-    )
-
-    screen_y = (
-        HEIGHT / 2
-        + (world_y - camera_y) * zoom
-    )
-
-    return (
-        screen_x,
-        screen_y
-    )
-
-
-# ============================================================
-# ПОИСК ПРОПА В КЭШЕ
-# ============================================================
-
-def get_scaled_prop(name):
-
-    for prop in scaled_props:
-
-        if prop["name"] == name:
-
-            return prop["image"]
-
-    return None
-
-
-# ============================================================
-# ОТРИСОВКА
-# ============================================================
-
-def draw_map():
-
-    if not terrain_map:
-
-        return
-
-    screen_rect = pygame.Rect(
-        0,
-        0,
-        WIDTH,
-        HEIGHT
-    )
-
-    # ========================================================
-    # СОЗДАЁМ ВСЕ ОБЪЕКТЫ
-    #
-    # Чтобы лужайки и пропы имели
-    # общий изометрический порядок.
-    # ========================================================
-
-    objects = []
-
-    # --------------------------------------------------------
-    # ЛУЖАЙКИ
-    # --------------------------------------------------------
-
-    for y in range(MAP_HEIGHT):
-
-        for x in range(MAP_WIDTH):
-
-            objects.append({
-
-                "depth": x + y,
-
-                "type": "tile",
-
-                "x": x,
-                "y": y,
-
-                "tile_id":
-                    terrain_map[y][x]
-
-            })
-
-    # --------------------------------------------------------
-    # ПРОПЫ
-    # --------------------------------------------------------
-
-    for prop_data in map_props:
-
-        x = prop_data["x"]
-        y = prop_data["y"]
-
-        objects.append({
-
-            "depth": x + y,
-
-            "type": "prop",
-
-            "x": x,
-            "y": y,
-
-            "prop_name":
-                prop_data["prop"]["name"]
-
-        })
-
-    # ========================================================
-    # СОРТИРОВКА ПО ГЛУБИНЕ
-    # ========================================================
-
-    objects.sort(
-        key=lambda obj: (
-            obj["depth"],
-            obj["y"],
-            obj["x"]
-        )
-    )
-
-    # ========================================================
-    # ОТРИСОВКА
-    # ========================================================
-
-    for obj in objects:
-
-        x = obj["x"]
-        y = obj["y"]
-
-        screen_x, screen_y = world_to_screen(
-            x,
-            y
-        )
-
-        # ----------------------------------------------------
-        # ЛУЖАЙКА
-        # ----------------------------------------------------
-
-        if obj["type"] == "tile":
-
-            tile_id = obj["tile_id"]
-
-            tile = scaled_tiles[
-                tile_id
+        if not files:
+            raise FileNotFoundError(f"No PNG terrain sprites found in {TERRAIN_PATH}")
+
+        groups: dict[str, list[Path]] = {
+            "deep_water": [],
+            "water": [],
+            "beach": [],
+            "grass": [],
+            "forest": [],
+            "hill": [],
+        }
+        unclassified: list[Path] = []
+
+        for path in files:
+            name = path.stem.casefold()
+            if any(key in name for key in ("deep_water", "deepwater", "glubok")):
+                groups["deep_water"].append(path)
+            elif any(key in name for key in ("water", "voda", "ocean", "sea")):
+                groups["water"].append(path)
+            elif any(key in name for key in ("sand", "pesok", "beach", "shore")):
+                groups["beach"].append(path)
+            elif any(key in name for key in ("forest", "les", "woodland")):
+                groups["forest"].append(path)
+            elif any(key in name for key in ("rock", "stone", "kamen", "hill", "skala")):
+                groups["hill"].append(path)
+            elif any(key in name for key in ("lujaika", "luzhaika", "grass", "lawn", "meadow")):
+                groups["grass"].append(path)
+            else:
+                unclassified.append(path)
+
+        if not groups["grass"]:
+            groups["grass"] = unclassified or files
+
+        loaded_by_path: dict[Path, pygame.Surface] = {}
+
+        def load_group(paths: list[Path]) -> list[pygame.Surface]:
+            result: list[pygame.Surface] = []
+            for path in paths:
+                if path not in loaded_by_path:
+                    image = self._load_image(path)
+                    if image is not None:
+                        loaded_by_path[path] = image
+                if path in loaded_by_path:
+                    result.append(loaded_by_path[path])
+            return result
+
+        sprites = {name: load_group(paths) for name, paths in groups.items()}
+        grass = sprites["grass"]
+        if not grass:
+            raise RuntimeError("Terrain sprites exist, but none could be loaded")
+
+        # Use at most three source variants for generated fallbacks to keep
+        # memory usage reasonable with 1000x1000 source sprites.
+        fallback_sources = grass[:3]
+
+        if not sprites["water"]:
+            sprites["water"] = [
+                tint_surface(image, (47, 132, 190), 0.78)
+                for image in fallback_sources
+            ]
+            print("No water*.png found: generated water fallback tiles")
+
+        if not sprites["deep_water"]:
+            sprites["deep_water"] = [
+                tint_surface(image, (25, 76, 128), 0.48)
+                for image in sprites["water"][:3]
             ]
 
-            rect = tile.get_rect(
-                center=(
-                    round(screen_x),
-                    round(screen_y)
+        if not sprites["beach"]:
+            sprites["beach"] = [
+                tint_surface(image, (210, 181, 112), 0.70)
+                for image in fallback_sources
+            ]
+
+        if not sprites["forest"]:
+            sprites["forest"] = [
+                tint_surface(image, (36, 105, 55), 0.34)
+                for image in fallback_sources
+            ]
+
+        if not sprites["hill"]:
+            sprites["hill"] = [
+                tint_surface(image, (116, 111, 98), 0.60)
+                for image in fallback_sources
+            ]
+
+        return sprites
+
+    def load_props(self) -> list[PropSprite]:
+        if not PROP_PATH.exists():
+            print(f"Props folder not found: {PROP_PATH}")
+            return []
+
+        result: list[PropSprite] = []
+        paths = sorted(
+            (
+                path
+                for path in PROP_PATH.iterdir()
+                if path.is_file() and path.suffix.casefold() == ".png"
+            ),
+            key=natural_key,
+        )
+        for path in paths:
+            image = self._load_image(path)
+            if image is not None:
+                result.append(PropSprite(path.stem, image))
+        return result
+
+    def regenerate(self, seed: int | None = None) -> None:
+        if seed is not None:
+            self.seed = seed
+        self.generate_map()
+        self.generate_props()
+        self.rebuild_draw_order()
+        self.show_status(
+            f"Seed {self.seed}: {len(self.map_props)} decorations",
+            seconds=3.0,
+        )
+
+    def generate_map(self) -> None:
+        height_noise = PerlinNoise2D(self.seed)
+        moisture_noise = PerlinNoise2D(self.seed ^ 0x5F356495)
+        detail_noise = PerlinNoise2D(self.seed ^ 0xA24BAED4)
+        result: list[list[TerrainCell]] = []
+
+        for y in range(MAP_HEIGHT):
+            row: list[TerrainCell] = []
+            for x in range(MAP_WIDTH):
+                height = height_noise.fbm(
+                    (x + 0.37) * HEIGHT_NOISE_SCALE,
+                    (y - 0.61) * HEIGHT_NOISE_SCALE,
                 )
-            )
-
-            # Не рисуем то,
-            # что полностью за экраном
-            if not screen_rect.colliderect(
-                rect
-            ):
-
-                continue
-
-            screen.blit(
-                tile,
-                rect
-            )
-
-        # ----------------------------------------------------
-        # ПРОП
-        # ----------------------------------------------------
-
-        elif obj["type"] == "prop":
-
-            prop_image = get_scaled_prop(
-                obj["prop_name"]
-            )
-
-            if prop_image is None:
-
-                continue
-
-            # ------------------------------------------------
-            # Проп стоит "на земле".
-            #
-            # Поэтому его нижняя часть находится
-            # примерно в центре клетки.
-            # ------------------------------------------------
-
-            prop_y = (
-                screen_y
-                - 30 * zoom
-            )
-
-            rect = prop_image.get_rect(
-                midbottom=(
-                    round(screen_x),
-                    round(prop_y)
+                detail = detail_noise.fbm(
+                    (x + 17.0) * HEIGHT_NOISE_SCALE * 2.1,
+                    (y - 23.0) * HEIGHT_NOISE_SCALE * 2.1,
+                    octaves=3,
                 )
-            )
+                height = height * 0.84 + detail * 0.16
 
-            if not screen_rect.colliderect(
-                rect
-            ):
+                nx = (x / max(1, MAP_WIDTH - 1)) * 2.0 - 1.0
+                ny = (y / max(1, MAP_HEIGHT - 1)) * 2.0 - 1.0
+                radial_distance = math.hypot(nx, ny) / math.sqrt(2.0)
+                island_falloff = smoothstep(ISLAND_START, 1.0, radial_distance)
+                height = clamp(height - island_falloff * ISLAND_STRENGTH, 0.0, 1.0)
 
+                moisture = moisture_noise.fbm(
+                    (x + 101.0) * MOISTURE_NOISE_SCALE,
+                    (y - 79.0) * MOISTURE_NOISE_SCALE,
+                    octaves=4,
+                )
+
+                if height < DEEP_WATER_LEVEL:
+                    biome = "deep_water"
+                elif height < SEA_LEVEL:
+                    biome = "water"
+                elif height < BEACH_LEVEL:
+                    biome = "beach"
+                elif height >= HILL_LEVEL:
+                    biome = "hill"
+                elif moisture >= FOREST_MOISTURE:
+                    biome = "forest"
+                else:
+                    biome = "grass"
+
+                variant_count = len(self.terrain_sprites[biome])
+                variant = min(
+                    variant_count - 1,
+                    int(coordinate_random(self.seed, x, y, 7) * variant_count),
+                )
+                row.append(TerrainCell(biome, height, moisture, variant))
+            result.append(row)
+
+        self.terrain_map = result
+
+    def cell_is_near_water(self, x: int, y: int, clearance: int) -> bool:
+        for offset_y in range(-clearance, clearance + 1):
+            for offset_x in range(-clearance, clearance + 1):
+                check_x = x + offset_x
+                check_y = y + offset_y
+                if not (0 <= check_x < MAP_WIDTH and 0 <= check_y < MAP_HEIGHT):
+                    continue
+                if self.terrain_map[check_y][check_x].biome in WATER_BIOMES:
+                    return True
+        return False
+
+@staticmethod
+    def prop_weight(prop: PropSprite, biome: str) -> float:
+        name = prop.name.casefold()
+        tree = any(key in name for key in ("tree", "derevo", "elka", "pine", "oak"))
+        bush = any(key in name for key in ("bush", "kust", "shrub"))
+        rock = any(key in name for key in ("rock", "stone", "kamen", "skala"))
+        flower = any(key in name for key in ("flower", "cvet", "grass", "trava"))
+
+        weight = 1.0
+        if biome == "forest":
+            weight *= 4.0 if tree or bush else 0.75
+        elif biome == "hill":
+            weight *= 4.0 if rock else 0.65
+        elif biome == "beach":
+            weight *= 0.18 if tree or flower else 1.5 if rock else 0.7
+        elif biome == "grass":
+            weight *= 2.0 if flower or bush else 0.75 if rock else 1.0
+        return weight
+
+    def choose_prop(self, biome: str, rng: random.Random) -> PropSprite:
+        weights = [self.prop_weight(prop, biome) for prop in self.props]
+        return rng.choices(self.props, weights=weights, k=1)[0]
+
+    def generate_props(self) -> None:
+        self.map_props = []
+        if not self.props:
+            return
+
+        rng = random.Random(self.seed ^ 0xD1B54A32)
+        prop_noise = PerlinNoise2D(self.seed ^ 0x94D049BB)
+        cells = [(x, y) for y in range(MAP_HEIGHT) for x in range(MAP_WIDTH)]
+        rng.shuffle(cells)
+
+        for x, y in cells:
+            cell = self.terrain_map[y][x]
+
+            # Hard guarantee: decorations are never anchored on water.
+            if cell.biome in WATER_BIOMES:
+                continue
+            if self.cell_is_near_water(x, y, PROP_WATER_CLEARANCE):
                 continue
 
-            screen.blit(
-                prop_image,
-                rect
+            base_chance = PROP_CHANCE_BY_BIOME.get(cell.biome, 0.0)
+            density = prop_noise.fbm(
+                (x + 41.0) * PROP_NOISE_SCALE,
+                (y - 57.0) * PROP_NOISE_SCALE,
+                octaves=3,
             )
+            chance = clamp(base_chance * lerp(0.35, 1.75, density), 0.0, 0.85)
+            if rng.random() > chance:
+                continue
 
+            self.map_props.append(
+                PlacedProp(x=x, y=y, sprite=self.choose_prop(cell.biome, rng))
+            )
+            if len(self.map_props) >= MAX_PROPS:
+                break
 
-# ============================================================
-# ZOOM
-# ============================================================
+        assert all(
+            self.terrain_map[prop.y][prop.x].biome not in WATER_BIOMES
+            for prop in self.map_props
+        )
 
-def change_zoom(
-    mouse_pos,
-    wheel
-):
+    def rebuild_draw_order(self) -> None:
+        items: list[tuple[int, int, int, int, str, object]] = []
+        for y, row in enumerate(self.terrain_map):
+            for x, cell in enumerate(row):
+                items.append((x + y, 0, y, x, "tile", cell))
+        for prop in self.map_props:
+            items.append((prop.x + prop.y, 1, prop.y, prop.x, "prop", prop))
+        items.sort(key=lambda item: item[:4])
+        self.draw_items = items
 
-    global zoom
-    global camera_x
-    global camera_y
+@staticmethod
+    def scale_image(image: pygame.Surface, scale: float) -> pygame.Surface:
+        size = (
+            max(1, round(image.get_width() * scale)),
+            max(1, round(image.get_height() * scale)),
+        )
+        return pygame.transform.smoothscale(image, size)
 
-    mouse_x, mouse_y = mouse_pos
+    def update_scaled_assets(self) -> None:
+        if self.scaled_assets_zoom is not None and math.isclose(
+            self.scaled_assets_zoom, self.zoom, abs_tol=1e-9
+        ):
+            return
 
-    # --------------------------------------------------------
-    # Точка мира под курсором ДО zoom
-    # --------------------------------------------------------
+        self.scaled_terrain = {
+            biome: [self.scale_image(image, self.zoom) for image in images]
+            for biome, images in self.terrain_sprites.items()
+        }
+        self.scaled_props = {
+            prop.name: self.scale_image(prop.image, self.zoom)
+            for prop in self.props
+        }
+        self.scaled_assets_zoom = self.zoom
 
-    world_mouse_x = (
-        camera_x
-        + (
-            mouse_x - WIDTH / 2
-        ) / zoom
-    )
+@staticmethod
+    def cell_to_world(x: int, y: int) -> tuple[float, float]:
+        return (x - y) * TILE_STEP_X, (x + y) * TILE_STEP_Y
 
-    world_mouse_y = (
-        camera_y
-        + (
-            mouse_y - HEIGHT / 2
-        ) / zoom
-    )
+    def world_to_screen(self, x: int, y: int) -> tuple[float, float]:
+        world_x, world_y = self.cell_to_world(x, y)
+        return (
+            WIDTH / 2 + (world_x - self.camera_x) * self.zoom,
+            HEIGHT / 2 + (world_y - self.camera_y) * self.zoom,
+        )
 
-    old_zoom = zoom
+    def center_camera(self) -> None:
+        self.camera_x = ((MAP_WIDTH - 1) - (MAP_HEIGHT - 1)) * TILE_STEP_X / 2
+        self.camera_y = ((MAP_WIDTH - 1) + (MAP_HEIGHT - 1)) * TILE_STEP_Y / 2
 
-    # --------------------------------------------------------
-    # Меняем масштаб
-    # --------------------------------------------------------
+    def draw_map(self) -> None:
+        screen_rect = self.screen.get_rect()
 
-    if wheel > 0:
+        for _, _, y, x, kind, payload in self.draw_items:
+            screen_x, screen_y = self.world_to_screen(x, y)
 
-        zoom *= ZOOM_SPEED
+            if kind == "tile":
+                cell = payload
+                assert isinstance(cell, TerrainCell)
+                image = self.scaled_terrain[cell.biome][cell.variant]
+                rect = image.get_rect(center=(round(screen_x), round(screen_y)))
+            else:
+                placed = payload
+                assert isinstance(placed, PlacedProp)
+                image = self.scaled_props[placed.sprite.name]
+                rect = image.get_rect(
+                    midbottom=(
+                        round(screen_x),
+                        round(screen_y - PROP_GROUND_OFFSET * self.zoom),
+                    )
+                )
 
-    else:
+            if screen_rect.colliderect(rect):
+                self.screen.blit(image, rect)
 
-        zoom /= ZOOM_SPEED
+    def change_zoom(self, mouse_pos: tuple[int, int], wheel: int) -> None:
+        if wheel == 0:
+            return
 
-    zoom = max(
-        MIN_ZOOM,
-        min(
+        mouse_x, mouse_y = mouse_pos
+        world_mouse_x = self.camera_x + (mouse_x - WIDTH / 2) / self.zoom
+        world_mouse_y = self.camera_y + (mouse_y - HEIGHT / 2) / self.zoom
+        old_zoom = self.zoom
+        self.zoom = clamp(
+            self.zoom * (ZOOM_SPEED ** wheel),
+            MIN_ZOOM,
             MAX_ZOOM,
-            zoom
-        )
-    )
-
-    # --------------------------------------------------------
-    # Сохраняем точку под мышью
-    # --------------------------------------------------------
-
-    if zoom != old_zoom:
-
-        camera_x = (
-            world_mouse_x
-            - (
-                mouse_x - WIDTH / 2
-            ) / zoom
         )
 
-        camera_y = (
-            world_mouse_y
-            - (
-                mouse_y - HEIGHT / 2
-            ) / zoom
+        if not math.isclose(old_zoom, self.zoom, abs_tol=1e-9):
+            self.camera_x = world_mouse_x - (mouse_x - WIDTH / 2) / self.zoom
+            self.camera_y = world_mouse_y - (mouse_y - HEIGHT / 2) / self.zoom
+            self.update_scaled_assets()
+
+    def drag_camera(self, pos: tuple[int, int]) -> None:
+        if not self.dragging:
+            return
+        if self.last_mouse_pos is None:
+            self.last_mouse_pos = pos
+            return
+
+        dx = pos[0] - self.last_mouse_pos[0]
+        dy = pos[1] - self.last_mouse_pos[1]
+        self.camera_x -= dx / self.zoom
+        self.camera_y -= dy / self.zoom
+        self.last_mouse_pos = pos
+
+    def keyboard_camera(self, delta_seconds: float) -> None:
+        keys = pygame.key.get_pressed()
+        speed = CAMERA_SPEED * delta_seconds / self.zoom
+        if keys[pygame.K_a] or keys[pygame.K_LEFT]:
+            self.camera_x -= speed
+        if keys[pygame.K_d] or keys[pygame.K_RIGHT]:
+            self.camera_x += speed
+        if keys[pygame.K_w] or keys[pygame.K_UP]:
+            self.camera_y -= speed
+        if keys[pygame.K_s] or keys[pygame.K_DOWN]:
+            self.camera_y += speed
+
+    def show_status(self, text: str, seconds: float = 4.0) -> None:
+        self.status_text = text
+        self.status_until = pygame.time.get_ticks() + round(seconds * 1000)
+
+    def draw_ui(self) -> None:
+        lines = [
+            f"Seed: {self.seed} Zoom: {self.zoom:.2f} Props: {len(self.map_props)}",
+            "MMB drag | Wheel zoom | WASD | SPACE new seed | R regenerate | C center | E export PNG",
+        ]
+        if self.status_text and pygame.time.get_ticks() < self.status_until:
+            lines.append(self.status_text)
+
+        rendered = [self.font.render(line, True, (255, 255, 255)) for line in lines]
+        box_width = max(surface.get_width() for surface in rendered) + 24
+        box_height = sum(surface.get_height() for surface in rendered) + 16
+        background = pygame.Surface((box_width, box_height), pygame.SRCALPHA)
+        background.fill((0, 0, 0, 185))
+        self.screen.blit(background, (6, 6))
+
+        y = 12
+        for surface in rendered:
+            self.screen.blit(surface, (18, y))
+            y += surface.get_height()
+
+    def export_bounds(self) -> tuple[float, float, float, float]:
+        min_x = math.inf
+        min_y = math.inf
+        max_x = -math.inf
+        max_y = -math.inf
+
+        for y, row in enumerate(self.terrain_map):
+            for x, cell in enumerate(row):
+                world_x, world_y = self.cell_to_world(x, y)
+                image = self.terrain_sprites[cell.biome][cell.variant]
+                half_width = image.get_width() / 2
+                half_height = image.get_height() / 2
+                min_x = min(min_x, world_x - half_width)
+                max_x = max(max_x, world_x + half_width)
+                min_y = min(min_y, world_y - half_height)
+                max_y = max(max_y, world_y + half_height)
+
+        for prop in self.map_props:
+            world_x, world_y = self.cell_to_world(prop.x, prop.y)
+            bottom = world_y - PROP_GROUND_OFFSET
+            image = prop.sprite.image
+            min_x = min(min_x, world_x - image.get_width() / 2)
+            max_x = max(max_x, world_x + image.get_width() / 2)
+            min_y = min(min_y, bottom - image.get_height())
+            max_y = max(max_y, bottom)
+
+        return (
+            math.floor(min_x - EXPORT_PADDING),
+            math.floor(min_y - EXPORT_PADDING),
+            math.ceil(max_x + EXPORT_PADDING),
+            math.ceil(max_y + EXPORT_PADDING),
         )
 
-        # Пересоздаём кэш
-        update_scaled_tiles()
-        update_scaled_props()
+@staticmethod
+    def export_geometry( bounds: tuple[float, float, float, float], requested_scale: float, ) -> tuple[float, tuple[int, int]]:
+        left, top, right, bottom = bounds
+        world_width = max(1.0, right - left)
+        world_height = max(1.0, bottom - top)
+        scale = min(
+            requested_scale,
+            EXPORT_MAX_SIDE / world_width,
+            EXPORT_MAX_SIDE / world_height,
+        )
+        size = (
+            max(1, math.ceil(world_width * scale)),
+            max(1, math.ceil(world_height * scale)),
+        )
+        return scale, size
 
+    def export_terrain_png( self, path: Path, bounds: tuple[float, float, float, float], scale: float, size: tuple[int, int], ) -> None:
+        layer = pygame.Surface(size, pygame.SRCALPHA, 32)
+        layer.fill((0, 0, 0, 0))
+        left, top, _, _ = bounds
+        cache: dict[tuple[str, int], pygame.Surface] = {}
 
-# ============================================================
-# ПЕРЕМЕЩЕНИЕ КАМЕРЫ МЫШЬЮ
-# ============================================================
+        cells = sorted(
+            (
+                (x + y, y, x, cell)
+                for y, row in enumerate(self.terrain_map)
+                for x, cell in enumerate(row)
+            ),
+            key=lambda item: item[:3],
+        )
+        for _, y, x, cell in cells:
+            key = (cell.biome, cell.variant)
+            if key not in cache:
+                cache[key] = self.scale_image(
+                    self.terrain_sprites[cell.biome][cell.variant], scale
+                )
+            image = cache[key]
+            world_x, world_y = self.cell_to_world(x, y)
+            rect = image.get_rect(
+                center=(
+                    round((world_x - left) * scale),
+                    round((world_y - top) * scale),
+                )
+            )
+            layer.blit(image, rect)
 
-dragging = False
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pygame.image.save(layer, str(path))
 
-last_mouse_pos = None
+    def export_decorations_png( self, path: Path, bounds: tuple[float, float, float, float], scale: float, size: tuple[int, int], ) -> None:
+        layer = pygame.Surface(size, pygame.SRCALPHA, 32)
+        layer.fill((0, 0, 0, 0))
+        left, top, _, _ = bounds
+        cache: dict[str, pygame.Surface] = {}
 
+        for prop in sorted(self.map_props, key=lambda item: (item.x + item.y, item.y, item.x)):
+            if prop.sprite.name not in cache:
+                cache[prop.sprite.name] = self.scale_image(prop.sprite.image, scale)
+            image = cache[prop.sprite.name]
+            world_x, world_y = self.cell_to_world(prop.x, prop.y)
+            rect = image.get_rect(
+                midbottom=(
+                    round((world_x - left) * scale),
+                    round((world_y - PROP_GROUND_OFFSET - top) * scale),
+                )
+            )
+            layer.blit(image, rect)
 
-def start_drag(pos):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pygame.image.save(layer, str(path))
 
-    global dragging
-    global last_mouse_pos
+    def export_map_layers(self, output_root: Path = EXPORT_PATH) -> tuple[Path, Path]:
+        """Exports aligned transparent terrain and decoration PNG layers."""
+        output_dir = output_root / f"map_{self.seed}"
+        terrain_path = output_dir / "terrain.png"
+        decorations_path = output_dir / "decorations.png"
 
-    dragging = True
+        bounds = self.export_bounds()
+        scale, size = self.export_geometry(bounds, EXPORT_SCALE)
+        self.export_terrain_png(terrain_path, bounds, scale, size)
+        self.export_decorations_png(decorations_path, bounds, scale, size)
 
-    last_mouse_pos = pos
+        print(f"Exported {size[0]}x{size[1]} PNG layers to {output_dir}")
+        return terrain_path, decorations_path
 
-
-def stop_drag():
-
-    global dragging
-    global last_mouse_pos
-
-    dragging = False
-
-    last_mouse_pos = None
-
-
-def drag_camera(pos):
-
-    global camera_x
-    global camera_y
-    global last_mouse_pos
-
-    if not dragging:
-
-        return
-
-    if last_mouse_pos is None:
-
-        last_mouse_pos = pos
-
-        return
-
-    old_x, old_y = last_mouse_pos
-
-    new_x, new_y = pos
-
-    dx = new_x - old_x
-    dy = new_y - old_y
-
-    # Переводим движение мыши
-    # из экранных координат
-    # в мировые
-
-    camera_x -= dx / zoom
-    camera_y -= dy / zoom
-
-    last_mouse_pos = pos
-
-
-# ============================================================
-# ДВИЖЕНИЕ КАМЕРЫ КЛАВИАТУРОЙ
-# ============================================================
-
-def keyboard_camera():
-
-    global camera_x
-    global camera_y
-
-    keys = pygame.key.get_pressed()
-
-    speed = CAMERA_SPEED / zoom
-
-    if (
-        keys[pygame.K_a]
-        or keys[pygame.K_LEFT]
-    ):
-
-        camera_x -= speed
-
-    if (
-        keys[pygame.K_d]
-        or keys[pygame.K_RIGHT]
-    ):
-
-        camera_x += speed
-
-    if (
-        keys[pygame.K_w]
-        or keys[pygame.K_UP]
-    ):
-
-        camera_y -= speed
-
-    if (
-        keys[pygame.K_s]
-        or keys[pygame.K_DOWN]
-    ):
-
-        camera_y += speed
-
-
-# ============================================================
-# UI
-# ============================================================
-
-font = pygame.font.Font(
-    None,
-    24
-)
-
-
-def draw_ui():
-
-    text = (
-        f"Zoom: {zoom:.2f}    "
-        f"СКМ — камера    "
-        f"Колесо — zoom    "
-        f"WASD — движение    "
-        f"SPACE — новая карта    "
-        f"Пропов: {len(map_props)}"
-    )
-
-    surface = font.render(
-        text,
-        True,
-        (255, 255, 255)
-    )
-
-    background = pygame.Surface(
-        (
-            surface.get_width() + 20,
-            surface.get_height() + 10
-        ),
-        pygame.SRCALPHA
-    )
-
-    background.fill(
-        (0, 0, 0, 180)
-    )
-
-    screen.blit(
-        background,
-        (5, 5)
-    )
-
-    screen.blit(
-        surface,
-        (15, 10)
-    )
-
-
-# ============================================================
-# ОСНОВНОЙ ЦИКЛ
-# ============================================================
-
-running = True
-
-
-while running:
-
-    clock.tick(FPS)
-
-    # ========================================================
-    # EVENTS
-    # ========================================================
-
-    for event in pygame.event.get():
-
-        # ----------------------------------------------------
-        # Выход
-        # ----------------------------------------------------
-
+    def handle_event(self, event: pygame.event.Event) -> bool:
         if event.type == pygame.QUIT:
+            return False
 
-            running = False
-
-        # ----------------------------------------------------
-        # Клавиатура
-        # ----------------------------------------------------
-
-        elif event.type == pygame.KEYDOWN:
-
-            # Новая карта
+        if event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_ESCAPE:
+                return False
             if event.key == pygame.K_SPACE:
-
-                generate_map()
-                generate_props()
-
-            # Выход
-            elif event.key == pygame.K_ESCAPE:
-
-                running = False
-
-        # ----------------------------------------------------
-        # Zoom
-        # ----------------------------------------------------
+                self.regenerate(self.make_seed())
+            elif event.key == pygame.K_r:
+                self.regenerate(self.seed)
+            elif event.key == pygame.K_c:
+                self.center_camera()
+            elif event.key == pygame.K_e:
+                try:
+                    terrain_path, _ = self.export_map_layers()
+                    self.show_status(f"Exported: {terrain_path.parent}", seconds=6.0)
+                except (pygame.error, OSError, MemoryError) as error:
+                    self.show_status(f"Export failed: {error}", seconds=8.0)
+                    print(f"Export failed: {error}")
 
         elif event.type == pygame.MOUSEWHEEL:
-
-            change_zoom(
-                pygame.mouse.get_pos(),
-                event.y
-            )
-
-        # ----------------------------------------------------
-        # Нажатие мыши
-        # ----------------------------------------------------
-
-        elif event.type == pygame.MOUSEBUTTONDOWN:
-
-            # Средняя кнопка
-            if event.button == 2:
-
-                start_drag(
-                    event.pos
-                )
-
-        # ----------------------------------------------------
-        # Отпускание мыши
-        # ----------------------------------------------------
-
-        elif event.type == pygame.MOUSEBUTTONUP:
-
-            if event.button == 2:
-
-                stop_drag()
-
-        # ----------------------------------------------------
-        # Движение мыши
-        # ----------------------------------------------------
-
+            self.change_zoom(pygame.mouse.get_pos(), event.y)
+        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 2:
+            self.dragging = True
+            self.last_mouse_pos = event.pos
+        elif event.type == pygame.MOUSEBUTTONUP and event.button == 2:
+            self.dragging = False
+            self.last_mouse_pos = None
         elif event.type == pygame.MOUSEMOTION:
+            self.drag_camera(event.pos)
+        return True
 
-            drag_camera(
-                event.pos
-            )
+    def run(self) -> None:
+        running = True
+        while running:
+            delta_seconds = self.clock.tick(FPS) / 1000.0
+            for event in pygame.event.get():
+                if not self.handle_event(event):
+                    running = False
+                    break
 
-    # ========================================================
-    # КАМЕРА
-    # ========================================================
-
-    keyboard_camera()
-
-    # ========================================================
-    # ОТРИСОВКА
-    # ========================================================
-
-    screen.fill(
-        (0, 0, 0)
-    )
-
-    draw_map()
-
-    draw_ui()
-
-    pygame.display.flip()
+            self.keyboard_camera(delta_seconds)
+            self.screen.fill((8, 15, 24))
+            self.draw_map()
+            self.draw_ui()
+            pygame.display.flip()
 
 
-# ============================================================
-# ВЫХОД
-# ============================================================
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Seeded Perlin isometric terrain generator")
+    parser.add_argument("--seed", type=int, help="Generate a reproducible map")
+    return parser.parse_args()
 
-pygame.quit()
-sys.exit()
+
+def main() -> None:
+    args = parse_args()
+    try:
+        TerrainApp(seed=args.seed).run()
+    finally:
+        pygame.quit()
+
+
+if __name__ == "__main__":
+    main()
