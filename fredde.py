@@ -1,91 +1,93 @@
 import random
-from Paddock import Paddock
+from paddock import Paddock as paddock
 
 MAX_AGE = 25
 
-STANDART_PADDOCK = Paddock(max_freds=99999)
+STANDART_PADDOCK = paddock(max_freds=99999)
 
 with open("NameList.txt", "r", encoding="utf-8") as f:
     NAME_LIST = f.read().splitlines()
 
 freddies = []
 
+
 class Fredde:
     def __init__(
-        self,
-        name=None,
-        paddock=STANDART_PADDOCK
-        age=1,
-        gender='is', #boy, girl, is (intersex), cf (childfree)
-        genid=1,
-        gendom=0.5,
-        mutrate=5,
-        rarity='common',
-        parents=None,
-        generation=0,
-        # Визуальные параметры
-        color=None,
-        eye='blue',
-        hatAcs='cylinder',
-        faceAcs='none',
-        eyeAcs='none',
-        bodyPattern='basic',
-        eyelash=False
+            self,
+            name=None,
+            paddock=STANDART_PADDOCK,
+        age = 1,
+        gender = 'is',  # boy, girl, is (intersex), cf (childfree)
+        genid = 1,
+        gendom = 0.5,
+        mutrate = 5,
+        rarity = 'common',
+        parents = None,
+        generation = 0,
+            # Визуальные параметры
+        color = None,
+        eye = 'blue',
+        hatAcs = 'cylinder',
+        faceAcs = 'none',
+        eyeAcs = 'none',
+        bodyPattern = 'basic',
+        eyelash = False
+
     ):
-        self.alive = True
-        self.name = name if name else random.choice(NAME_LIST)
-        self.age = age
-        self.color = color if color else [255, 185, 107]
-        self.genid = genid
-        self.gendom = gendom
-        self.mutrate = mutrate
-        self.rarity = rarity
-        self.parents = parents if parents else []
-        self.generation = generation
-        self.gender = gender
-        self.eye = eye
-        self.hatAcs = hatAcs
-        self.faceAcs = faceAcs
-        self.eyeAcs = eyeAcs
-        self.bodyPattern = bodyPattern
-        self.eyelash = eyelash
-        self.max_age = MAX_AGE * (1 - self.mutrate / 100)
-        
-        is_added = paddock.add(self)
+     self.alive = True
+     self.name = name if name else random.choice(NAME_LIST)
+     self.age = age
+     self.color = color if color else [255, 185, 107]
+     self.genid = genid
+     self.gendom = gendom
+     self.mutrate = mutrate
+     self.rarity = rarity
+     self.parents = parents if parents else []
+     self.generation = generation
+     self.gender = gender
+     self.eye = eye
+     self.hatAcs = hatAcs
+     self.faceAcs = faceAcs
+     self.eyeAcs = eyeAcs
+     self.bodyPattern = bodyPattern
+     self.eyelash = eyelash
+     self.max_age = MAX_AGE * (1 - self.mutrate / 100)
 
-        if is_added:
-            self._paddock = paddock
-        else:
-            STANDART_PADDOCK.add(self)
-            self._paddock = STANDART_PADDOCK
-        
+     is_added = paddock.add(self)
 
-        freddies.append(self)
+     if is_added:
+         self._paddock = paddock
+     else:
+         STANDART_PADDOCK.add(self)
+         self._paddock = STANDART_PADDOCK
 
-    
-        
-    @property
-    def family(self):
-        family = set()
+     freddies.append(self)
 
-        for parent in self.parents:
-            family.add(parent)
-            
-            for relative in parent.parents:
-                family.add(relative)
 
-        return family
+@property
+def family(self):
+    family = set()
 
-    def check_death(self):
-        if self.alive and self.age > self.max_age:
-            if random.random() < 0.5:
-                self.alive = False
+    for parent in self.parents:
+        family.add(parent)
 
-        if self.alive:
-            return True
+        for relative in parent.parents:
+            family.add(relative)
 
-        return False
+    return family
 
-    def step():
-        if self.check_death():
-            age += 1
+
+def check_death(self):
+    if self.alive and self.age > self.max_age:
+        if random.random() < 0.5:
+            self.alive = False
+
+    if self.alive:
+        return True
+
+    return False
+
+
+def step(self):
+    if self.check_death():
+        self.age += 1
