@@ -1,4 +1,4 @@
-from Paddock import paddocks
+from paddock import paddocks
 
 
 def step():
