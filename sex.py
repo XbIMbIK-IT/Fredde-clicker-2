@@ -1,6 +1,7 @@
-from fredde import Fredde
+from fredde import Fredde as fredde
 import random
 import os
+
 
 # Подгрузка визуала и случайный визуал
 def load_visuals():
@@ -27,12 +28,17 @@ def load_visuals():
             visuals[param] = []
 
     return visuals
+
+
 Visuals = load_visuals()
+
 
 def random_visual(visuals, param):
     return random.choice(visuals[param])
 
 
+with open("NameList.txt", "r", encoding="utf-8") as f:
+    NameList = f.read().splitlines()
 RarityList = ['common', 'uncommon', 'rare', 'epic', 'mythic', 'legendary']
 SEX_AGE = 3
 
@@ -111,13 +117,12 @@ def sex(parent1, parent2):
 
     # Словарь с визуалом
     baby_visuals = {
-    "bodyPattern": parent1.bodyPattern if random.random() <= parent1_chance else parent2.bodyPattern,
-    "eye": parent1.eye if random.random() <= parent1_chance else parent2.eye,
-    "eyeAcs": parent1.eyeAcs if random.random() <= parent1_chance else parent2.eyeAcs,
-    "faceAcs": parent1.faceAcs if random.random() <= parent1_chance else parent2.faceAcs,
-    "hatAcs": parent1.hatAcs if random.random() <= parent1_chance else parent2.hatAcs
+        "bodyPattern": parent1.bodyPattern if random.random() <= parent1_chance else parent2.bodyPattern,
+        "eye": parent1.eye if random.random() <= parent1_chance else parent2.eye,
+        "eyeAcs": parent1.eyeAcs if random.random() <= parent1_chance else parent2.eyeAcs,
+        "faceAcs": parent1.faceAcs if random.random() <= parent1_chance else parent2.faceAcs,
+        "hatAcs": parent1.hatAcs if random.random() <= parent1_chance else parent2.hatAcs
     }
-
 
     # Мутация
     if random.uniform(0, 100) <= MutRate:
@@ -168,8 +173,6 @@ def sex(parent1, parent2):
         if random.random() <= 0.5:
             baby_visuals["hatAcs"] = random_visual(Visuals, "hatAcs")
 
-    
-
     # Пол ребенка
     gender_roll = random.uniform(0, 100)
     if gender_roll < 45:
@@ -194,7 +197,8 @@ def sex(parent1, parent2):
     babygenid = round(babygenid)
     babygendom = round(babygendom, 3)
     MutRate = round(MutRate, 1)
-    return Fredde(
+    return fredde(
+        name=random.choice(NameList),
         color=babycolor,
         genid=babygenid,
         gendom=babygendom,
@@ -220,15 +224,15 @@ def mut_chance(parent1, parent2, total_dom):
     # Инбридинг
     if is_inbreeding(parent1, parent2):
         if MutRate <= 0:
-            MutRate = 8
+            MutRate = 13
         else:
             MutRate *= 1.3
-    elif random.random() <= 0.5 and parent1.generation == parent2.generation:
-        MutRate -= 6
+    elif random.random() <= 0.4 and parent1.generation == parent2.generation:
+        MutRate -= 4
 
     # Разница поколений
     if parent1.generation != parent2.generation:
         gendif = abs(parent2.generation - parent1.generation)
-        MutRate += (gendif * 1.3)
+        MutRate += (gendif * 2)
 
     return MutRate
