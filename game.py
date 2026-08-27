@@ -242,7 +242,10 @@ def buy_fredde():
 
     food -= FREDDE_FOOD_COST
 
-    new_fredde = Fredde()
+    new_fredde = Fredde(
+        name=f"Fredde #{len(freddies) + 1}",
+        age=1
+    )
 
     set_message(
         f"Создан новый Fredde: {new_fredde.name}"
