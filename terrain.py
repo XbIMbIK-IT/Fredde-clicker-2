@@ -23,8 +23,8 @@ WIDTH = 1920
 HEIGHT = 1080
 FPS = 60
 
-MAP_WIDTH = 30
-MAP_HEIGHT = 30
+MAP_WIDTH = 88
+MAP_HEIGHT = 88
 
 
 # ============================================================
@@ -33,7 +33,12 @@ MAP_HEIGHT = 30
 
 TILE_STEP_X = 489
 TILE_STEP_Y = 218
-PROP_GROUND_OFFSET = 30
+
+# Small extra cosmetic nudge applied on top of each prop's measured foot
+# point, so sprites sink very slightly into the tile instead of looking
+# like they're balanced exactly on the seam. Purely aesthetic, not
+# load-bearing for alignment (unlike the old global offset).
+PROP_GROUND_NUDGE = 900
 
 
 # ============================================================
@@ -61,16 +66,37 @@ ISLAND_STRENGTH = 0.45
 
 WATER_BIOMES = frozenset({"deep_water", "water"})
 
+# Biomes that must never receive decorations, no matter what
+# PROP_CHANCE_BY_BIOME says. This is the hard, unconditional guarantee;
+# PROP_CHANCE_BY_BIOME is only a tunable density on top of this.
+PROP_FORBIDDEN_BIOMES = WATER_BIOMES | frozenset({"hill"})
+
 
 # ============================================================
 # DECORATIONS
 # ============================================================
 
 PROP_CHANCE_BY_BIOME = {
-    "beach": 0.025,
+    "beach": 0,
     "grass": 0.11,
     "forest": 0.24,
-    "hill": 0.07,
+    "hill": 0,
+}
+
+# Keyword tags used to classify a prop sprite by its filename.
+PROP_ROCK_KEYS = ("rock", "stone", "kamen", "skala")
+PROP_TREE_KEYS = ("tree", "derevo", "elka", "pine", "oak")
+PROP_BUSH_KEYS = ("bush", "kust", "shrub")
+PROP_FLOWER_KEYS = ("flower", "cvet", "trava")
+
+# Which prop categories are allowed to spawn on each biome. Only rocks may
+# appear on beach tiles; everything else ("ground") is restricted to grass
+# and forest tiles. Biomes not listed here (deep_water, water, hill) never
+# get props at all — enforced by PROP_FORBIDDEN_BIOMES above.
+BIOME_ALLOWED_PROP_CATEGORIES: dict[str, frozenset[str]] = {
+    "beach": frozenset({"rock"}),
+    "forest": frozenset({"tree", "bush", "flower", "other"}),
+    "grass": frozenset({"tree", "bush", "flower", "other"}),
 }
 
 MAX_PROPS = MAP_WIDTH * MAP_HEIGHT
@@ -134,6 +160,22 @@ def coordinate_random(seed: int, x: int, y: int, salt: int = 0) -> float:
     return value / 2**32
 
 
+def sprite_bottom_padding(image: pygame.Surface) -> int:
+    """How many fully-transparent rows sit below a sprite's actual
+    artwork, i.e. how far a naive get_rect() bottom edge overshoots the
+    object's real visual base. Different prop sprites (trees, rocks,
+    bushes...) carry different amounts of empty canvas below their
+    artwork, so this must be measured per-sprite rather than assumed to
+    be a single global constant.
+    """
+    width, height = image.get_size()
+    for y in range(height - 1, -1, -1):
+        for x in range(width):
+            if image.get_at((x, y)).a > 0:
+                return height - 1 - y
+    return 0
+
+
 class PerlinNoise2D:
     """Small dependency-free implementation of seeded 2D Perlin noise."""
 
@@ -153,13 +195,13 @@ class PerlinNoise2D:
         random.Random(seed).shuffle(permutation)
         self.permutation = permutation * 2
 
-@staticmethod
+    @staticmethod
     def _fade(value: float) -> float:
         return value * value * value * (
             value * (value * 6.0 - 15.0) + 10.0
         )
 
-@classmethod
+    @classmethod
     def _dot(cls, hashed: int, x: float, y: float) -> float:
         gx, gy = cls._GRADIENTS[hashed & 7]
         return gx * x + gy * y
@@ -194,7 +236,14 @@ class PerlinNoise2D:
         )
         return clamp(lerp(bottom, top, v) * 1.41421356, -1.0, 1.0)
 
-    def fbm( self, x: float, y: float, octaves: int = NOISE_OCTAVES, lacunarity: float = NOISE_LACUNARITY, gain: float = NOISE_GAIN, ) -> float:
+    def fbm(
+        self,
+        x: float,
+        y: float,
+        octaves: int = NOISE_OCTAVES,
+        lacunarity: float = NOISE_LACUNARITY,
+        gain: float = NOISE_GAIN,
+    ) -> float:
         """Fractal Brownian motion assembled from several Perlin octaves."""
         value = 0.0
         amplitude = 1.0
@@ -223,6 +272,11 @@ class TerrainCell:
 class PropSprite:
     name: str
     image: pygame.Surface
+    # Measured once at load time: how many transparent rows sit below
+    # this sprite's actual artwork. Used instead of a single global
+    # ground offset, since that overshoots for some sprites and
+    # undershoots for others.
+    foot_padding: int
 
 
 @dataclass(frozen=True)
@@ -232,7 +286,9 @@ class PlacedProp:
     sprite: PropSprite
 
 
-def tint_surface( image: pygame.Surface, color: tuple[int, int, int], strength: float, ) -> pygame.Surface:
+def tint_surface(
+    image: pygame.Surface, color: tuple[int, int, int], strength: float,
+) -> pygame.Surface:
     """Recolors a fallback tile while preserving its alpha channel."""
     strength = clamp(strength, 0.0, 1.0)
     multiplier = round(255 * (1.0 - strength))
@@ -264,6 +320,10 @@ class TerrainApp:
         self.seed = seed if seed is not None else self.make_seed()
         self.terrain_sprites = self.load_terrain_sprites()
         self.props = self.load_props()
+        self.prop_categories = {
+            prop.name: self.classify_prop(prop) for prop in self.props
+        }
+        self.props_by_biome = self.build_props_by_biome()
 
         self.scaled_terrain: dict[str, list[pygame.Surface]] = {}
         self.scaled_props: dict[str, pygame.Surface] = {}
@@ -280,11 +340,11 @@ class TerrainApp:
         self.regenerate(self.seed)
         self.center_camera()
 
-@staticmethod
+    @staticmethod
     def make_seed() -> int:
         return random.SystemRandom().randrange(1, 2**31)
 
-@staticmethod
+    @staticmethod
     def _load_image(path: Path) -> pygame.Surface | None:
         try:
             image = pygame.image.load(str(path)).convert_alpha()
@@ -411,8 +471,44 @@ class TerrainApp:
         for path in paths:
             image = self._load_image(path)
             if image is not None:
-                result.append(PropSprite(path.stem, image))
+                result.append(
+                    PropSprite(
+                        name=path.stem,
+                        image=image,
+                        foot_padding=sprite_bottom_padding(image),
+                    )
+                )
         return result
+
+    @staticmethod
+    def classify_prop(prop: PropSprite) -> str:
+        """Buckets a prop sprite into rock / tree / bush / flower / other
+        based on its filename, so biome placement can be locked down."""
+        name = prop.name.casefold()
+        if any(key in name for key in PROP_ROCK_KEYS):
+            return "rock"
+        if any(key in name for key in PROP_TREE_KEYS):
+            return "tree"
+        if any(key in name for key in PROP_BUSH_KEYS):
+            return "bush"
+        if any(key in name for key in PROP_FLOWER_KEYS):
+            return "flower"
+        return "other"
+
+    def build_props_by_biome(self) -> dict[str, list[PropSprite]]:
+        """Precomputes, per biome, the list of props actually allowed to
+        spawn there. Rocks are the only thing allowed on beach; everything
+        else ("ground") is restricted to grass and forest. Biomes not
+        present in BIOME_ALLOWED_PROP_CATEGORIES (water, deep_water, hill)
+        never get anything — see PROP_FORBIDDEN_BIOMES."""
+        by_biome: dict[str, list[PropSprite]] = {}
+        for biome, allowed_categories in BIOME_ALLOWED_PROP_CATEGORIES.items():
+            by_biome[biome] = [
+                prop
+                for prop in self.props
+                if self.prop_categories[prop.name] in allowed_categories
+            ]
+        return by_biome
 
     def regenerate(self, seed: int | None = None) -> None:
         if seed is not None:
@@ -491,13 +587,13 @@ class TerrainApp:
                     return True
         return False
 
-@staticmethod
+    @staticmethod
     def prop_weight(prop: PropSprite, biome: str) -> float:
         name = prop.name.casefold()
-        tree = any(key in name for key in ("tree", "derevo", "elka", "pine", "oak"))
-        bush = any(key in name for key in ("bush", "kust", "shrub"))
-        rock = any(key in name for key in ("rock", "stone", "kamen", "skala"))
-        flower = any(key in name for key in ("flower", "cvet", "grass", "trava"))
+        tree = any(key in name for key in PROP_TREE_KEYS)
+        bush = any(key in name for key in PROP_BUSH_KEYS)
+        rock = any(key in name for key in PROP_ROCK_KEYS)
+        flower = any(key in name for key in PROP_FLOWER_KEYS)
 
         weight = 1.0
         if biome == "forest":
@@ -505,14 +601,20 @@ class TerrainApp:
         elif biome == "hill":
             weight *= 4.0 if rock else 0.65
         elif biome == "beach":
-            weight *= 0.18 if tree or flower else 1.5 if rock else 0.7
+            weight *= 1.5 if rock else 0.7
         elif biome == "grass":
             weight *= 2.0 if flower or bush else 0.75 if rock else 1.0
         return weight
 
-    def choose_prop(self, biome: str, rng: random.Random) -> PropSprite:
-        weights = [self.prop_weight(prop, biome) for prop in self.props]
-        return rng.choices(self.props, weights=weights, k=1)[0]
+    def choose_prop(self, biome: str, rng: random.Random) -> PropSprite | None:
+        # Only ever pick from the pre-filtered, biome-eligible pool; if a
+        # biome has no eligible props (e.g. no rock sprites exist), simply
+        # place nothing rather than falling back to an unrelated prop.
+        candidates = self.props_by_biome.get(biome, [])
+        if not candidates:
+            return None
+        weights = [self.prop_weight(prop, biome) for prop in candidates]
+        return rng.choices(candidates, weights=weights, k=1)[0]
 
     def generate_props(self) -> None:
         self.map_props = []
@@ -527,8 +629,10 @@ class TerrainApp:
         for x, y in cells:
             cell = self.terrain_map[y][x]
 
-            # Hard guarantee: decorations are never anchored on water.
-            if cell.biome in WATER_BIOMES:
+            # Hard, unconditional guarantee: decorations never spawn on
+            # water, deep water, or hill tiles — regardless of what
+            # PROP_CHANCE_BY_BIOME says.
+            if cell.biome in PROP_FORBIDDEN_BIOMES:
                 continue
             if self.cell_is_near_water(x, y, PROP_WATER_CLEARANCE):
                 continue
@@ -543,14 +647,23 @@ class TerrainApp:
             if rng.random() > chance:
                 continue
 
-            self.map_props.append(
-                PlacedProp(x=x, y=y, sprite=self.choose_prop(cell.biome, rng))
-            )
+            chosen_prop = self.choose_prop(cell.biome, rng)
+            if chosen_prop is None:
+                continue
+
+            self.map_props.append(PlacedProp(x=x, y=y, sprite=chosen_prop))
             if len(self.map_props) >= MAX_PROPS:
                 break
 
         assert all(
-            self.terrain_map[prop.y][prop.x].biome not in WATER_BIOMES
+            self.terrain_map[prop.y][prop.x].biome not in PROP_FORBIDDEN_BIOMES
+            for prop in self.map_props
+        )
+        assert all(
+            self.prop_categories[prop.sprite.name]
+            in BIOME_ALLOWED_PROP_CATEGORIES.get(
+                self.terrain_map[prop.y][prop.x].biome, frozenset()
+            )
             for prop in self.map_props
         )
 
@@ -564,7 +677,7 @@ class TerrainApp:
         items.sort(key=lambda item: item[:4])
         self.draw_items = items
 
-@staticmethod
+    @staticmethod
     def scale_image(image: pygame.Surface, scale: float) -> pygame.Surface:
         size = (
             max(1, round(image.get_width() * scale)),
@@ -588,7 +701,7 @@ class TerrainApp:
         }
         self.scaled_assets_zoom = self.zoom
 
-@staticmethod
+    @staticmethod
     def cell_to_world(x: int, y: int) -> tuple[float, float]:
         return (x - y) * TILE_STEP_X, (x + y) * TILE_STEP_Y
 
@@ -618,10 +731,17 @@ class TerrainApp:
                 placed = payload
                 assert isinstance(placed, PlacedProp)
                 image = self.scaled_props[placed.sprite.name]
+                # Anchor using this specific sprite's measured foot
+                # padding rather than a single global constant, since
+                # different props have different amounts of transparent
+                # canvas below their artwork.
+                foot_offset = (
+                    placed.sprite.foot_padding - PROP_GROUND_NUDGE
+                ) * self.zoom
                 rect = image.get_rect(
                     midbottom=(
                         round(screen_x),
-                        round(screen_y - PROP_GROUND_OFFSET * self.zoom),
+                        round(screen_y - foot_offset),
                     )
                 )
 
@@ -715,7 +835,8 @@ class TerrainApp:
 
         for prop in self.map_props:
             world_x, world_y = self.cell_to_world(prop.x, prop.y)
-            bottom = world_y - PROP_GROUND_OFFSET
+            foot_offset = prop.sprite.foot_padding - PROP_GROUND_NUDGE
+            bottom = world_y - foot_offset
             image = prop.sprite.image
             min_x = min(min_x, world_x - image.get_width() / 2)
             max_x = max(max_x, world_x + image.get_width() / 2)
@@ -729,8 +850,10 @@ class TerrainApp:
             math.ceil(max_y + EXPORT_PADDING),
         )
 
-@staticmethod
-    def export_geometry( bounds: tuple[float, float, float, float], requested_scale: float, ) -> tuple[float, tuple[int, int]]:
+    @staticmethod
+    def export_geometry(
+        bounds: tuple[float, float, float, float], requested_scale: float,
+    ) -> tuple[float, tuple[int, int]]:
         left, top, right, bottom = bounds
         world_width = max(1.0, right - left)
         world_height = max(1.0, bottom - top)
@@ -745,7 +868,13 @@ class TerrainApp:
         )
         return scale, size
 
-    def export_terrain_png( self, path: Path, bounds: tuple[float, float, float, float], scale: float, size: tuple[int, int], ) -> None:
+    def export_terrain_png(
+        self,
+        path: Path,
+        bounds: tuple[float, float, float, float],
+        scale: float,
+        size: tuple[int, int],
+    ) -> None:
         layer = pygame.Surface(size, pygame.SRCALPHA, 32)
         layer.fill((0, 0, 0, 0))
         left, top, _, _ = bounds
@@ -778,7 +907,13 @@ class TerrainApp:
         path.parent.mkdir(parents=True, exist_ok=True)
         pygame.image.save(layer, str(path))
 
-    def export_decorations_png( self, path: Path, bounds: tuple[float, float, float, float], scale: float, size: tuple[int, int], ) -> None:
+    def export_decorations_png(
+        self,
+        path: Path,
+        bounds: tuple[float, float, float, float],
+        scale: float,
+        size: tuple[int, int],
+    ) -> None:
         layer = pygame.Surface(size, pygame.SRCALPHA, 32)
         layer.fill((0, 0, 0, 0))
         left, top, _, _ = bounds
@@ -789,10 +924,11 @@ class TerrainApp:
                 cache[prop.sprite.name] = self.scale_image(prop.sprite.image, scale)
             image = cache[prop.sprite.name]
             world_x, world_y = self.cell_to_world(prop.x, prop.y)
+            foot_offset = prop.sprite.foot_padding - PROP_GROUND_NUDGE
             rect = image.get_rect(
                 midbottom=(
                     round((world_x - left) * scale),
-                    round((world_y - PROP_GROUND_OFFSET - top) * scale),
+                    round((world_y - foot_offset - top) * scale),
                 )
             )
             layer.blit(image, rect)
