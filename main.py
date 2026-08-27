@@ -1,27 +1,26 @@
 from fredde import freddies
-from fredde import Fredde
+from fredde import Fredde as fredde
 from sex import try_sex,sex
 import tree
-from simulation import step
 from freddePhoto import show_fredde
 from freddePhoto import save_fredde
 
-Ded1 = Fredde(
-    name='Гипнокрад',
-    eyelash= False,
-    eye= 'blackout',
-    hatAcs= 'foil',
-    faceAcs= 'tube',
+Ded1 = fredde(
+    name='Сало',
+    eyelash= True,
+    eye= 'blue',
+    hatAcs= 'usa',
+    eyeAcs= 'coolshades',
     bodyPattern= 'afghanistan',
-    color=[255, 255, 0],
+    color=[192, 185, 159],
     genid=10,
     gendom=0.3,
-    mutrate=0,
+    mutrate=50,
     rarity='rare',
     age=11
 )
 
-Babka1 = Fredde(
+Babka1 = fredde(
     name='Агафья',
     eyelash= False,
     eye= 'hearts',
@@ -31,42 +30,42 @@ Babka1 = Fredde(
     color=[255, 0, 0],
     genid=20,
     gendom=0.8,
-    mutrate=0,
+    mutrate=50,
     rarity='common',
     age=11
 )
 
-Ded2 = Fredde(
+Ded2 = fredde(
     name='Касеки',
     eyelash=False,
     eye='ghoul',
-    hatAcs='horns2',
+    hatAcs='casque',
     faceAcs='drop',
     bodyPattern='xeno',
     color=[131, 71, 201],
     genid=20,
     gendom=0.8,
-    mutrate=0,
+    mutrate=50,
     rarity='common',
     age=11
 )
 
-Babka2 = Fredde(
+Babka2 = fredde(
     name='Бабка гренни',
     eyelash=False,
-    eye='herobrine',
-    hatAcs='nimbus',
-    faceAcs='tears',
-    bodyPattern='blood',
+    eye='smoker',
+    hatAcs='ushanka',
+    faceAcs='cigar',
+    bodyPattern='brain',
     color=[14, 12, 224],
     genid=20,
     gendom=0.8,
-    mutrate=0,
+    mutrate=50,
     rarity='common',
     age=11
 )
 
-Ded3 = Fredde(
+Ded3 = fredde(
     name='Хрящ',
     eyelash=False,
     eye='ghoul',
@@ -76,27 +75,27 @@ Ded3 = Fredde(
     color=[12, 71, 44],
     genid=20,
     gendom=0.8,
-    mutrate=0,
+    mutrate=50,
     rarity='common',
     age=11
 )
 
-Babka3 = Fredde(
+Babka3 = fredde(
     name='Баба капа',
     eyelash=False,
     eye='herobrine',
     hatAcs='nimbus',
     faceAcs='tears',
-    bodyPattern='blood',
+    bodyPattern='flower',
     color=[131, 12, 12],
     genid=20,
     gendom=0.8,
-    mutrate=0,
+    mutrate=50,
     rarity='common',
     age=11
 )
 
-Gurin = Fredde(
+Gurin = fredde(
     name='Гурин',
     eyelash=False,
     eye='gurin',
@@ -113,11 +112,36 @@ Gurin = Fredde(
 )
 
 
-baby, message = try_sex(Ded1, Babka1)
-print(message)
-baby2, message = try_sex(Ded2, Babka2)
-print(message)
 
+
+
+baby = sex(Ded1, Babka1)
+baby1 = sex(Ded3, Babka3)
+baby2 = sex(Ded2, Babka2)
+baby3 = sex(baby, baby2)
+baby4 = sex(baby3, baby2)
+baby5 = sex(Ded2, Babka2)
+baby6 = sex(baby5, baby2)
+baby7 = sex(Gurin, Babka3)
+baby8 = sex(Ded1, Babka1)
+
+baby9 = sex(baby1, baby3)
+baby10 = sex(baby4, baby6)
+baby11 = sex(baby7, baby8)
+baby12 = sex(baby9, baby10)
+baby13 = sex(baby11, baby12)
+baby14 = sex(baby2, baby8)
+baby15 = sex(baby5, baby7)
+baby16 = sex(baby3, baby9)
+baby17 = sex(baby6, baby10)
+baby18 = sex(baby4, baby11)
+baby19 = sex(baby12, baby14)
+baby20 = sex(baby13, baby15)
+baby21 = sex(baby16, baby17)
+baby22 = sex(baby18, baby19)
+baby23 = sex(baby20, baby21)
+baby24 = sex(baby22, baby23)
+baby25 = sex(baby9, baby14)
 
 #if baby:
 #    values = [
@@ -136,25 +160,8 @@ print(message)
 #        print(f"{name}: {value}")
 #
 
-step(freddies)
-step(freddies)
 
 
-baby3, message = try_sex(Ded3, Babka3)
-print(message)
-step(freddies)
-step(freddies)
-
-baby4, message = try_sex(baby, baby2)
-step(freddies)
-step(freddies)
-baby5, message = try_sex(baby3, baby4)
-baby6, message = try_sex(baby4, Ded3)
-step(freddies)
-step(freddies)
-baby7, message = try_sex(baby3, baby5)
 # print(baby.age)
-
-#show_fredde(Babka1)
 
 tree.main()
