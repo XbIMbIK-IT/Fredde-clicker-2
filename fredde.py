@@ -64,30 +64,30 @@ class Fredde:
      freddies.append(self)
 
 
-@property
-def family(self):
-    family = set()
+    @property
+    def family(self):
+        family = set()
 
-    for parent in self.parents:
-        family.add(parent)
+        for parent in self.parents:
+            family.add(parent)
 
-        for relative in parent.parents:
-            family.add(relative)
+            for relative in parent.parents:
+                family.add(relative)
 
-    return family
-
-
-def check_death(self):
-    if self.alive and self.age > self.max_age:
-        if random.random() < 0.5:
-            self.alive = False
-
-    if self.alive:
-        return True
-
-    return False
+        return family
 
 
-def step(self):
-    if self.check_death():
-        self.age += 1
+    def check_death(self):
+        if self.alive and self.age > self.max_age:
+            if random.random() < 0.5:
+                self.alive = False
+
+        if self.alive:
+            return True
+
+        return False
+
+
+    def step(self):
+        if self.check_death():
+            self.age += 1
