@@ -1,7 +1,7 @@
 from fredde import Fredde as fredde
 import random
 import os
-
+from freddeBrain import breedBrain
 
 # Подгрузка визуала и случайный визуал
 def load_visuals():
@@ -59,7 +59,11 @@ def try_sex(parent1, parent2):
         if parent1.age < SEX_AGE or parent2.age < SEX_AGE:
             return None, "Один из родителей слишком молод"
 
+        if parent1.hibernation or parent2.hibernation:
+            return None, "Один из родителей в гибернации"
+
         return sex(parent1, parent2), "Успешно"
+
 
     except Exception as e:
         return None, f"Ошибка при размножении: {e}"
@@ -194,6 +198,14 @@ def sex(parent1, parent2):
     else:
         eyelash = True
 
+    babybrain = breedBrain(
+        parent1.brain,
+        parent2.brain,
+        parent1.gendom,
+        parent2.gendom,
+        MutRate,
+    )
+
     babygenid = round(babygenid)
     babygendom = round(babygendom, 3)
     MutRate = round(MutRate, 1)
@@ -209,6 +221,7 @@ def sex(parent1, parent2):
         gender=babygender,
         age=1,
         eyelash=eyelash,
+        brain=babybrain,
 
         bodyPattern=baby_visuals["bodyPattern"],
         eye=baby_visuals["eye"],
