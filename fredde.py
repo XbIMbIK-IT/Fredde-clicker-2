@@ -1,7 +1,8 @@
 import random
 from paddock import Paddock as paddock
+from freddeBrain import createBrain
 
-MAX_AGE = 25
+MAX_AGE = 50
 
 STANDART_PADDOCK = paddock(max_freds=99999)
 
@@ -13,10 +14,11 @@ freddies = []
 
 class Fredde:
     def __init__(
-            self,
-            name=None,
-            paddock=STANDART_PADDOCK,
+        self,
+        name=None,
+        paddock=STANDART_PADDOCK,
         age = 1,
+        hibernation = False,
         gender = 'is',  # boy, girl, is (intersex), cf (childfree)
         genid = 1,
         gendom = 0.5,
@@ -24,7 +26,9 @@ class Fredde:
         rarity = 'common',
         parents = None,
         generation = 0,
-            # Визуальные параметры
+        brain = None,
+
+        # Визуальные параметры
         color = None,
         eye = 'blue',
         hatAcs = 'cylinder',
@@ -52,6 +56,11 @@ class Fredde:
      self.bodyPattern = bodyPattern
      self.eyelash = eyelash
      self.max_age = MAX_AGE * (1 - self.mutrate / 100)
+     self.hibernation = hibernation
+     if brain is None:
+         self.brain = createBrain()
+     else:
+         self.brain = list(brain)
 
      is_added = paddock.add(self)
 
