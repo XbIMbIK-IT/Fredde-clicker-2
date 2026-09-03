@@ -66,6 +66,28 @@ ISLAND_STRENGTH = 0.45
 
 WATER_BIOMES = frozenset({"deep_water", "water"})
 
+# Gameplay rules for one terrain inside a Paddock.
+# Change this table to allow or forbid movement on a biome.
+FREDDE_WALKABLE_BY_BIOME: dict[str, bool] = {
+    "deep_water": False,
+    "water": False,
+    "beach": True,
+    "grass": True,
+    "forest": True,
+    "hill": False,
+}
+
+# These decorations occupy their whole cell. Bushes and flowers do not.
+FREDDE_BLOCKING_PROP_CATEGORIES = frozenset({"tree", "rock", "stump"})
+
+# Directions are named by how they look on the isometric screen.
+ISOMETRIC_DIRECTIONS: dict[str, tuple[int, int]] = {
+    "left_up": (-1, 0),
+    "right_up": (0, -1),
+    "left_down": (0, 1),
+    "right_down": (1, 0),
+}
+
 # Biomes that must never receive decorations, no matter what
 # PROP_CHANCE_BY_BIOME says. This is the hard, unconditional guarantee;
 # PROP_CHANCE_BY_BIOME is only a tunable density on top of this.
@@ -86,6 +108,7 @@ PROP_CHANCE_BY_BIOME = {
 # Keyword tags used to classify a prop sprite by its filename.
 PROP_ROCK_KEYS = ("rock", "stone", "kamen", "skala")
 PROP_TREE_KEYS = ("tree", "derevo", "elka", "pine", "oak")
+PROP_STUMP_KEYS = ("stump", "penek", "penyok", "wood", "log", "stick")
 PROP_BUSH_KEYS = ("bush", "kust", "shrub")
 PROP_FLOWER_KEYS = ("flower", "cvet", "trava")
 
@@ -95,8 +118,8 @@ PROP_FLOWER_KEYS = ("flower", "cvet", "trava")
 # get props at all — enforced by PROP_FORBIDDEN_BIOMES above.
 BIOME_ALLOWED_PROP_CATEGORIES: dict[str, frozenset[str]] = {
     "beach": frozenset({"rock"}),
-    "forest": frozenset({"tree", "bush", "flower", "other"}),
-    "grass": frozenset({"tree", "bush", "flower", "other"}),
+    "forest": frozenset({"tree", "stump", "bush", "flower", "other"}),
+    "grass": frozenset({"tree", "stump", "bush", "flower", "other"}),
 }
 
 MAX_PROPS = MAP_WIDTH * MAP_HEIGHT
@@ -328,9 +351,11 @@ class TerrainApp:
         self.scaled_terrain: dict[str, list[pygame.Surface]] = {}
         self.scaled_props: dict[str, pygame.Surface] = {}
         self.scaled_assets_zoom: float | None = None
+        self.scaled_assets_cache = {}
 
         self.terrain_map: list[list[TerrainCell]] = []
         self.map_props: list[PlacedProp] = []
+        self.blocked_cells: set[tuple[int, int]] = set()
         self.draw_items: list[tuple[int, int, int, int, str, object]] = []
 
         self.status_text = ""
@@ -482,13 +507,15 @@ class TerrainApp:
 
     @staticmethod
     def classify_prop(prop: PropSprite) -> str:
-        """Buckets a prop sprite into rock / tree / bush / flower / other
+        """Buckets a prop sprite into rock / tree / stump / bush / flower / other
         based on its filename, so biome placement can be locked down."""
         name = prop.name.casefold()
         if any(key in name for key in PROP_ROCK_KEYS):
             return "rock"
         if any(key in name for key in PROP_TREE_KEYS):
             return "tree"
+        if any(key in name for key in PROP_STUMP_KEYS):
+            return "stump"
         if any(key in name for key in PROP_BUSH_KEYS):
             return "bush"
         if any(key in name for key in PROP_FLOWER_KEYS):
@@ -515,6 +542,7 @@ class TerrainApp:
             self.seed = seed
         self.generate_map()
         self.generate_props()
+        self.rebuild_collision_map()
         self.rebuild_draw_order()
         self.show_status(
             f"Seed {self.seed}: {len(self.map_props)} decorations",
@@ -575,6 +603,51 @@ class TerrainApp:
             result.append(row)
 
         self.terrain_map = result
+
+    def rebuild_collision_map(self) -> None:
+        """Cache cells occupied by solid decorations."""
+        self.blocked_cells = {
+            (prop.x, prop.y)
+            for prop in self.map_props
+            if self.prop_categories.get(prop.sprite.name)
+            in FREDDE_BLOCKING_PROP_CATEGORIES
+        }
+
+    def in_bounds(self, x: int, y: int) -> bool:
+        return 0 <= x < MAP_WIDTH and 0 <= y < MAP_HEIGHT
+
+    def cell_at(self, x: int, y: int) -> TerrainCell | None:
+        if not self.in_bounds(x, y):
+            return None
+        return self.terrain_map[y][x]
+
+    def is_walkable(self, x: int, y: int) -> bool:
+        cell = self.cell_at(x, y)
+        return bool(
+            cell is not None
+            and FREDDE_WALKABLE_BY_BIOME.get(cell.biome, False)
+            and (x, y) not in self.blocked_cells
+        )
+
+    def destination(
+        self,
+        position: tuple[int, int] | list[int],
+        direction: str,
+    ) -> tuple[int, int] | None:
+        """Return a valid neighbouring cell, or None when movement is blocked."""
+        try:
+            dx, dy = ISOMETRIC_DIRECTIONS[direction]
+        except KeyError as error:
+            raise ValueError(f"Неизвестное направление: {direction}") from error
+        x, y = int(position[0]) + dx, int(position[1]) + dy
+        return (x, y) if self.is_walkable(x, y) else None
+
+    def walkable_cells(self):
+        """Yield walkable (x, y) positions for spawning Fredde."""
+        for y in range(MAP_HEIGHT):
+            for x in range(MAP_WIDTH):
+                if self.is_walkable(x, y):
+                    yield x, y
 
     def cell_is_near_water(self, x: int, y: int, clearance: int) -> bool:
         for offset_y in range(-clearance, clearance + 1):
@@ -685,21 +758,42 @@ class TerrainApp:
         )
         return pygame.transform.smoothscale(image, size)
 
+    @staticmethod
+    def scale_game_image(image: pygame.Surface, scale: float) -> pygame.Surface:
+        size = (
+            max(1, round(image.get_width() * scale)),
+            max(1, round(image.get_height() * scale)),
+        )
+        return pygame.transform.scale(image, size)
+
     def update_scaled_assets(self) -> None:
         if self.scaled_assets_zoom is not None and math.isclose(
             self.scaled_assets_zoom, self.zoom, abs_tol=1e-9
         ):
             return
 
+        zoomKey = round(self.zoom, 4)
+        if zoomKey in self.scaled_assets_cache:
+            self.scaled_terrain, self.scaled_props = self.scaled_assets_cache.pop(zoomKey)
+            self.scaled_assets_cache[zoomKey] = (self.scaled_terrain, self.scaled_props)
+            self.scaled_assets_zoom = self.zoom
+            return
+
         self.scaled_terrain = {
-            biome: [self.scale_image(image, self.zoom) for image in images]
+            biome: [self.scale_game_image(image, self.zoom) for image in images]
             for biome, images in self.terrain_sprites.items()
         }
         self.scaled_props = {
-            prop.name: self.scale_image(prop.image, self.zoom)
+            prop.name: self.scale_game_image(prop.image, self.zoom)
             for prop in self.props
         }
         self.scaled_assets_zoom = self.zoom
+        if self.zoom <= 0.75:
+            self.scaled_assets_cache[zoomKey] = (self.scaled_terrain, self.scaled_props)
+
+        while len(self.scaled_assets_cache) > 4:
+            firstKey = next(iter(self.scaled_assets_cache))
+            del self.scaled_assets_cache[firstKey]
 
     @staticmethod
     def cell_to_world(x: int, y: int) -> tuple[float, float]:
