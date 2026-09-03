@@ -1,1039 +1,772 @@
+import argparse
+import json
+import random
+from datetime import datetime
+from pathlib import Path
+
 import pygame
-import sys
-import time
 
-from fredde import freddies, Fredde
-from sex import try_sex
-from simulation import step
+from fredde import Fredde, STANDART_PADDOCK, freddies
+from freddeBrain import BRAIN_SIZE, createBrain
 from freddePhoto import generate_fredde
+from simulation import move, occupied, requestSex, step as simulationStep
+from terrain import (
+    HEIGHT,
+    MAP_HEIGHT,
+    MAP_WIDTH,
+    MAX_ZOOM,
+    MIN_ZOOM,
+    TILE_STEP_X,
+    TILE_STEP_Y,
+    WIDTH,
+    TerrainApp,
+)
 
 
-# ============================================================
-# НАСТРОЙКИ ИГРЫ
-# ============================================================
+BASE_DIR = Path(__file__).resolve().parent
+SAVES_DIR = BASE_DIR / "saves"
+SPEEDS = (0.25, 0.5, 1, 2, 5, 10, 20)
+DIRECTION_KEYS = {
+    pygame.K_q: "left_up",
+    pygame.K_e: "right_up",
+    pygame.K_z: "left_down",
+    pygame.K_c: "right_down",
+}
 
-WIDTH = 1300
-HEIGHT = 800
-FPS = 60
-
-# Экономика
-CLICK_POINTS = 1
-
-FOOD_START = 20
-POINTS_START = 0
-DOLLARS_START = 0
-
-FOOD_PRICE = 5
-FOOD_BUY_AMOUNT = 10
-
-FREDDE_FOOD_COST = 10
-FREDDE_SELL_PRICE = 25
-
-# Сколько еды появляется пассивно
-# за каждого МЁРТВОГО Fredde
-FOOD_PER_DEAD_PER_SECOND = 0.2
-
-# Сколько времени занимает один игровой год
-YEAR_LENGTH = 30
+BACKGROUND = (7, 12, 20)
+PANEL = (18, 27, 40)
+PANEL_LIGHT = (38, 52, 70)
+WHITE = (238, 243, 249)
+MUTED = (151, 166, 184)
+BLUE = (61, 153, 255)
+GREEN = (71, 202, 139)
+YELLOW = (244, 193, 79)
+RED = (235, 91, 102)
 
 
-# ============================================================
-# ЦВЕТА
-# ============================================================
+class Game:
+    def __init__(self, arguments):
+        self.terrain = TerrainApp(seed=arguments.seed)
+        self.screen = self.terrain.screen
+        self.clock = pygame.time.Clock()
+        pygame.display.set_caption("Fredde World")
 
-BG = (25, 27, 30)
-PANEL = (38, 40, 45)
-PANEL_HOVER = (55, 58, 65)
+        self.world = STANDART_PADDOCK
+        self.world.terrain = self.terrain
+        self.world.max_freds = 100000
+        self.world.time = True
 
-WHITE = (240, 240, 240)
-GRAY = (150, 150, 150)
+        self.fontBig = pygame.font.SysFont("dejavusans", 28, bold=True)
+        self.font = pygame.font.SysFont("dejavusans", 20)
+        self.fontSmall = pygame.font.SysFont("dejavusans", 16)
+        self.fontTiny = pygame.font.SysFont("dejavusans", 13)
 
-YELLOW = (240, 190, 50)
-GREEN = (70, 200, 100)
-RED = (220, 70, 70)
-BLUE = (80, 140, 230)
-ORANGE = (230, 140, 50)
-
-
-# ============================================================
-# PYGAME
-# ============================================================
-
-pygame.init()
-
-fullscreen = False
-screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.RESIZABLE)
-pygame.display.set_caption("Fredde")
-
-clock = pygame.time.Clock()
-
-
-# Шрифты
-font_big = pygame.font.Font(None, 42)
-font_medium = pygame.font.Font(None, 30)
-font_small = pygame.font.Font(None, 23)
-font_tiny = pygame.font.Font(None, 19)
-
-
-# ============================================================
-# РЕСУРСЫ
-# ============================================================
-
-points = POINTS_START
-dollars = DOLLARS_START
-food = FOOD_START
-
-selected_fredde = None
-selected_parent1 = None
-selected_parent2 = None
-
-# Состояние интерфейса
-current_tab = "alive"       # "alive" или "dead"
-list_scroll = 0
-list_rect = pygame.Rect(310, 145, 430, HEIGHT - 215)
-TAB_HEIGHT = 42
-
-message = "Добро пожаловать в Fredde!"
-
-game_year = 1
-last_year_time = time.time()
-
-
-# ============================================================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-# ============================================================
-
-def draw_text(text, font, color, x, y, center=False):
-    surface = font.render(str(text), True, color)
-
-    if center:
-        rect = surface.get_rect(center=(x, y))
-    else:
-        rect = surface.get_rect(topleft=(x, y))
-
-    screen.blit(surface, rect)
-
-
-def button(rect, text, color, font=font_small):
-    mouse = pygame.mouse.get_pos()
-
-    if rect.collidepoint(mouse):
-        draw_color = tuple(min(255, c + 20) for c in color)
-    else:
-        draw_color = color
-
-    pygame.draw.rect(
-        screen,
-        draw_color,
-        rect,
-        border_radius=8
-    )
-
-    pygame.draw.rect(
-        screen,
-        WHITE,
-        rect,
-        2,
-        border_radius=8
-    )
-
-    draw_text(
-        text,
-        font,
-        WHITE,
-        rect.centerx,
-        rect.centery,
-        center=True
-    )
-
-
-def alive_freddies():
-    return [f for f in freddies if f.alive]
-
-
-def dead_freddies():
-    return [f for f in freddies if not f.alive]
-
-
-def visible_freddies():
-    """Fredde для текущей вкладки."""
-    if current_tab == "alive":
-        return alive_freddies()
-    return dead_freddies()
-
-
-def toggle_fullscreen():
-    global screen, fullscreen
-    fullscreen = not fullscreen
-
-    if fullscreen:
-        screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
-    else:
-        screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.RESIZABLE)
-
-
-def clamp_scroll(items_count):
-    global list_scroll
-    visible_rows = max(1, (list_rect.height - TAB_HEIGHT) // 85)
-    max_scroll = max(0, items_count - visible_rows)
-    list_scroll = max(0, min(list_scroll, max_scroll))
-
-
-def get_fredde_image(fred, size=110):
-    """
-    Генерирует Pygame-картинку Fredde.
-    """
-
-    try:
-        image = generate_fredde(fred)
-
-        data = image.tobytes()
-
-        surface = pygame.image.fromstring(
-            data,
-            image.size,
-            "RGBA"
-        ).convert_alpha()
-
-        surface = pygame.transform.smoothscale(
-            surface,
-            (size, size)
+        self.running = True
+        self.paused = arguments.paused
+        self.speedIndex = min(
+            range(len(SPEEDS)),
+            key=lambda number: abs(SPEEDS[number] - arguments.speed),
         )
+        self.accumulator = 0.0
+        self.turn = 0
 
-        return surface
+        self.parent1 = None
+        self.parent2 = None
+        self.selectedFred = None
+        self.popup = None
+        self.popupFred = None
+        self.popupCell = None
+        self.popupButtons = {}
+        self.popupRect = pygame.Rect(0, 0, 0, 0)
+        self.menuButton = pygame.Rect(WIDTH - 154, 18, 132, 44)
 
-    except Exception as e:
-        print("Ошибка генерации Fredde:", e)
+        self.message = ""
+        self.messageColor = WHITE
+        self.messageUntil = 0
+        self.fredCache = {}
+        self.fredOriginalCache = {}
+
+        loaded = False
+        if arguments.loadPath:
+            loaded = self.loadGame(Path(arguments.loadPath))
+        elif arguments.latest:
+            loaded = self.loadLatest()
+
+        if not loaded:
+            self.spawnRandom(arguments.spawn)
+
+        self.showMessage("ПКМ — действия")
+
+    def run(self):
+        while self.running:
+            delta = min(self.clock.tick(60) / 1000, 0.1)
+            self.handleEvents()
+
+            if not self.paused:
+                self.accumulator += delta * SPEEDS[self.speedIndex]
+                steps = 0
+                while self.accumulator >= 1 and steps < 20:
+                    self.nextTurn()
+                    self.accumulator -= 1
+                    steps += 1
+
+            self.draw()
+
+        pygame.quit()
+
+    def nextTurn(self):
+        babies = simulationStep()
+        self.turn += 1
+        if babies:
+            self.showMessage(f"Родилось Фредди: {len(babies)}", GREEN)
+
+    def handleEvents(self):
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                self.running = False
+
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_SPACE:
+                    self.paused = not self.paused
+                elif event.key == pygame.K_ESCAPE:
+                    if self.popup == "world":
+                        self.closePopup()
+                    else:
+                        self.openWorldPopup(None)
+                elif event.key in DIRECTION_KEYS and self.popup != "world":
+                    self.manualMove(DIRECTION_KEYS[event.key])
+
+            elif event.type == pygame.MOUSEWHEEL and self.popup is None:
+                self.terrain.change_zoom(pygame.mouse.get_pos(), event.y)
+
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 1:
+                    self.leftClick(event.pos)
+                elif event.button == 2 and self.popup is None:
+                    self.terrain.dragging = True
+                    self.terrain.last_mouse_pos = event.pos
+                elif event.button == 3:
+                    self.rightClick(event.pos)
+
+            elif event.type == pygame.MOUSEBUTTONUP and event.button == 2:
+                self.terrain.dragging = False
+                self.terrain.last_mouse_pos = None
+
+            elif event.type == pygame.MOUSEMOTION and self.popup is None:
+                self.terrain.drag_camera(event.pos)
+
+    def leftClick(self, position):
+        if self.menuButton.collidepoint(position):
+            self.openWorldPopup(None)
+            return
+
+        if self.popup is None:
+            return
+
+        for action, rectangle in self.popupButtons.items():
+            if rectangle.collidepoint(position):
+                self.press(action)
+                return
+
+        if not self.popupRect.collidepoint(position):
+            self.closePopup()
+
+    def rightClick(self, position):
+        fred = self.fredAt(position)
+        if fred is not None:
+            self.selectedFred = fred
+            self.popup = "fred"
+            self.popupFred = fred
+            self.popupCell = tuple(fred.position)
+            return
+
+        cell = self.screenToCell(position)
+        if cell is not None:
+            self.openWorldPopup(cell)
+
+    def openWorldPopup(self, cell):
+        self.popup = "world"
+        self.popupFred = None
+        self.popupCell = cell
+
+    def closePopup(self):
+        self.popup = None
+        self.popupFred = None
+        self.popupCell = None
+        self.popupButtons.clear()
+
+    def press(self, action):
+        if action == "close":
+            self.closePopup()
+        elif action == "spawn":
+            fred = self.spawnFredde(self.popupCell)
+            if fred is not None:
+                self.selectedFred = fred
+                self.popup = "fred"
+                self.popupFred = fred
+        elif action == "pause":
+            self.paused = not self.paused
+        elif action == "step":
+            self.nextTurn()
+        elif action == "slower":
+            self.speedIndex = max(0, self.speedIndex - 1)
+        elif action == "faster":
+            self.speedIndex = min(len(SPEEDS) - 1, self.speedIndex + 1)
+        elif action == "save":
+            self.saveGame()
+        elif action == "load":
+            self.loadLatest()
+        elif action == "center":
+            self.terrain.center_camera()
+            self.closePopup()
+        elif action == "clearParents":
+            self.parent1 = None
+            self.parent2 = None
+        elif action == "exit":
+            self.popup = "exit"
+        elif action == "exitYes":
+            self.running = False
+        elif action == "exitNo":
+            self.openWorldPopup(None)
+        elif action == "parent1":
+            self.selectParent(1)
+        elif action == "parent2":
+            self.selectParent(2)
+        elif action == "breed":
+            self.forceBreed()
+        elif action in ("left_up", "right_up", "left_down", "right_down"):
+            self.manualMove(action)
+
+    def selectParent(self, number):
+        fred = self.popupFred
+        if fred is None or not fred.alive:
+            self.showMessage("Нужен живой Фредди", RED)
+            return
+
+        if number == 1:
+            self.parent1 = fred
+        else:
+            self.parent2 = fred
+        self.showMessage(f"Родитель {number}: {fred.name}", YELLOW)
+
+    def forceBreed(self):
+        if self.parent1 is None or self.parent2 is None:
+            self.showMessage("Сначала выбери двух родителей", RED)
+            return
+
+        try:
+            baby, message = requestSex(self.parent1, self.parent2, forced=True)
+        except Exception as error:
+            self.showMessage(f"Ошибка: {error}", RED)
+            return
+
+        self.showMessage(message, GREEN if baby else RED)
+
+        if baby is not None:
+            self.parent1 = None
+            self.parent2 = None
+            self.selectedFred = baby
+            self.popupFred = baby
+            self.popupCell = tuple(baby.position)
+
+    def manualMove(self, direction):
+        fred = self.popupFred or self.selectedFred
+        if fred is None or not fred.alive:
+            self.showMessage("Нужен живой Фредди", RED)
+            return
+
+        if move(fred, direction):
+            self.popupCell = tuple(fred.position)
+        else:
+            self.showMessage("Туда пройти нельзя", RED)
+
+    def spawnRandom(self, amount):
+        positions = list(self.terrain.walkable_cells())
+        random.shuffle(positions)
+        made = 0
+        for position in positions:
+            if made >= amount:
+                break
+            if self.spawnFredde(position, False) is not None:
+                made += 1
+
+    def spawnFredde(self, position, announce=True):
+        if position is None or not self.terrain.is_walkable(*position):
+            if announce:
+                self.showMessage("Эта клетка непроходима", RED)
+            return None
+        if occupied(self.world, position):
+            if announce:
+                self.showMessage("Клетка занята", RED)
+            return None
+
+        fred = Fredde(paddock=self.world)
+        fred.position = list(position)
+        if len(getattr(fred, "brain", [])) != BRAIN_SIZE:
+            fred.brain = createBrain()
+        fred.hibernation = getattr(fred, "hibernation", False)
+        fred.reward = getattr(fred, "reward", 0)
+        fred.successful_sex = getattr(fred, "successful_sex", 0)
+
+        if announce:
+            self.showMessage(f"Создан {fred.name}", GREEN)
+        return fred
+
+    def screenToCell(self, position):
+        screenX, screenY = position
+        worldX = self.terrain.camera_x + (screenX - WIDTH / 2) / self.terrain.zoom
+        worldY = self.terrain.camera_y + (screenY - HEIGHT / 2) / self.terrain.zoom
+        x = round((worldX / TILE_STEP_X + worldY / TILE_STEP_Y) / 2)
+        y = round((worldY / TILE_STEP_Y - worldX / TILE_STEP_X) / 2)
+        return (x, y) if 0 <= x < MAP_WIDTH and 0 <= y < MAP_HEIGHT else None
+
+    def fredAt(self, position):
+        visible = sorted(
+            (fred for fred in self.world.freddies if fred.position is not None),
+            key=lambda fred: sum(fred.position),
+            reverse=True,
+        )
+        for fred in visible:
+            screenX, screenY = self.terrain.world_to_screen(*fred.position)
+            size = max(36, min(180, round(360 * self.terrain.zoom)))
+            rectangle = pygame.Rect(0, 0, size, size)
+            rectangle.midbottom = (round(screenX), round(screenY + 10))
+            if rectangle.inflate(10, 10).collidepoint(position):
+                return fred
         return None
 
+    def draw(self):
+        self.screen.fill(BACKGROUND)
+        self.terrain.draw_map()
+        self.drawSelection()
+        self.drawFreddies()
+        self.drawHud()
+        if self.popup is not None:
+            self.drawPopup()
+        self.drawMessage()
+        pygame.display.flip()
 
-def click():
-    global points
+    def drawSelection(self):
+        cell = self.popupCell
+        if cell is None and self.selectedFred is not None:
+            cell = getattr(self.selectedFred, "position", None)
+        if cell is not None:
+            self.drawDiamond(cell, YELLOW, 3)
 
-    points += CLICK_POINTS
+    def drawDiamond(self, cell, color, width):
+        centerX, centerY = self.terrain.world_to_screen(*cell)
+        radiusX = TILE_STEP_X * self.terrain.zoom
+        radiusY = TILE_STEP_Y * self.terrain.zoom
+        points = [
+            (centerX, centerY - radiusY),
+            (centerX + radiusX, centerY),
+            (centerX, centerY + radiusY),
+            (centerX - radiusX, centerY),
+        ]
+        pygame.draw.polygon(self.screen, color, points, width)
 
-
-def buy_food():
-    global points
-    global food
-
-    if points < FOOD_PRICE:
-        set_message("Недостаточно поинтов!")
-
-        return
-
-    points -= FOOD_PRICE
-    food += FOOD_BUY_AMOUNT
-
-    set_message(
-        f"Куплено {FOOD_BUY_AMOUNT} еды!"
-    )
-
-
-def buy_fredde():
-    global food
-
-    if food < FREDDE_FOOD_COST:
-        set_message(
-            "Недостаточно еды для создания Fredde!"
+    def drawFreddies(self):
+        ordered = sorted(
+            (fred for fred in self.world.freddies if fred.position is not None),
+            key=lambda fred: sum(fred.position),
         )
 
-        return
+        for fred in ordered:
+            screenX, screenY = self.terrain.world_to_screen(*fred.position)
+            if not self.screen.get_rect().inflate(200, 200).collidepoint(screenX, screenY):
+                continue
 
-    food -= FREDDE_FOOD_COST
+            size = max(36, min(180, round(360 * self.terrain.zoom)))
+            image = self.fredSurface(fred, size)
 
-    new_fredde = Fredde(
-        name=f"Fredde #{len(freddies) + 1}",
-        age=1
-    )
+            if fred is self.selectedFred:
+                pygame.draw.circle(self.screen, YELLOW, (round(screenX), round(screenY)), size // 2 + 4, 3)
+            if fred is self.parent1:
+                pygame.draw.circle(self.screen, BLUE, (round(screenX), round(screenY)), size // 2, 3)
+            if fred is self.parent2:
+                pygame.draw.circle(self.screen, GREEN, (round(screenX), round(screenY)), size // 2 - 4, 3)
 
-    set_message(
-        f"Создан новый Fredde: {new_fredde.name}"
-    )
+            picture = image if fred.alive else image.copy()
+            if not fred.alive:
+                picture.set_alpha(90)
+            rectangle = picture.get_rect(midbottom=(round(screenX), round(screenY + 10)))
+            self.screen.blit(picture, rectangle)
 
+            if getattr(fred, "hibernation", False) and fred.alive:
+                self.drawText("Zz", screenX + size * 0.2, screenY - size * 0.65, self.fontSmall, BLUE)
 
-def sell_fredde(fred):
-    global dollars
+            if self.terrain.zoom >= 0.14:
+                label = self.fontTiny.render(fred.name, True, WHITE)
+                labelRect = label.get_rect(midtop=(screenX, screenY + 12))
+                pygame.draw.rect(self.screen, BACKGROUND, labelRect.inflate(8, 4), border_radius=4)
+                self.screen.blit(label, labelRect)
 
-    if fred is None:
-        return
+    def fredSurface(self, fred, size):
+        visual = (
+            tuple(fred.color), fred.eye, fred.hatAcs, fred.faceAcs,
+            fred.eyeAcs, fred.bodyPattern, fred.eyelash,
+        )
+        originalKey = (id(fred), visual)
+        key = (originalKey, size)
+        if key not in self.fredCache:
+            if originalKey not in self.fredOriginalCache:
+                try:
+                    image = generate_fredde(fred).convert("RGBA")
+                    original = pygame.image.fromstring(
+                        image.tobytes(), image.size, "RGBA"
+                    ).convert_alpha()
+                except Exception:
+                    original = pygame.Surface((256, 256), pygame.SRCALPHA)
+                    pygame.draw.circle(original, tuple(fred.color), (128, 128), 124)
+                self.fredOriginalCache[originalKey] = original
 
-    if not fred.alive:
-        set_message(
-            "Мёртвого Fredde продавать нельзя!"
+            original = self.fredOriginalCache[originalKey]
+            self.fredCache[key] = pygame.transform.scale(original, (size, size))
+        return self.fredCache[key]
+
+    def drawHud(self):
+        alive = sum(fred.alive for fred in self.world.freddies)
+        status = "ПАУЗА" if self.paused else "ИДЁТ"
+
+        panel = pygame.Surface((460, 48), pygame.SRCALPHA)
+        panel.fill((12, 19, 29, 220))
+        self.screen.blit(panel, (18, 16))
+        self.drawText(
+            f"Ход {self.turn}   Живых {alive}   {SPEEDS[self.speedIndex]}x   {status}",
+            34, 31, self.fontSmall, GREEN if not self.paused else YELLOW,
         )
 
-        return
-
-    dollars += FREDDE_SELL_PRICE
-
-    fred.alive = False
-
-    set_message(
-        f"{fred.name} продан за ${FREDDE_SELL_PRICE}"
-    )
-
-
-def reproduce(parent1, parent2):
-    global food
-
-    if parent1 is None or parent2 is None:
-        set_message(
-            "Выбери двух родителей!"
-        )
-
-        return
-
-    if food < FREDDE_FOOD_COST:
-        set_message(
-            "Недостаточно еды!"
-        )
-
-        return
-
-    baby, result = try_sex(
-        parent1,
-        parent2
-    )
-
-    if baby is not None:
-        food -= FREDDE_FOOD_COST
-
-        set_message(
-            f"Рождение: {baby.name}"
-        )
-
-    else:
-        set_message(result)
-
-
-def set_message(text):
-    global message
-
-    message = text
-
-
-# ============================================================
-# ПАССИВНАЯ ЕДА
-# ============================================================
-
-last_food_time = time.time()
-
-
-def passive_food():
-    global food
-    global last_food_time
-
-    current = time.time()
-
-    if current - last_food_time >= 1:
-
-        dead_count = len(dead_freddies())
-
-        food += dead_count * FOOD_PER_DEAD_PER_SECOND
-
-        last_food_time = current
-
-
-# ============================================================
-# ИГРОВОЙ ГОД
-# ============================================================
-
-def next_year():
-    global game_year
-
-    old_dead = len(dead_freddies())
-
-    step(freddies)
-
-    new_dead = len(dead_freddies())
-
-    game_year += 1
-
-    if new_dead > old_dead:
-        set_message(
-            f"Прошёл год. Умерло Fredde: {new_dead - old_dead}"
-        )
-    else:
-        set_message(
-            "Прошёл ещё один год."
-        )
-
-
-# ============================================================
-# КНОПКИ
-# ============================================================
-
-click_button = pygame.Rect(
-    30,
-    130,
-    240,
-    70
-)
-
-buy_food_button = pygame.Rect(
-    30,
-    220,
-    240,
-    55
-)
-
-buy_fredde_button = pygame.Rect(
-    30,
-    290,
-    240,
-    55
-)
-
-year_button = pygame.Rect(
-    30,
-    360,
-    240,
-    55
-)
-
-reproduce_button = pygame.Rect(
-    30,
-    430,
-    240,
-    55
-)
-
-sell_button = pygame.Rect(
-    30,
-    500,
-    240,
-    55
-)
-
-# Кнопки вкладок и полноэкранного режима.
-# Их положение обновляется каждый кадр, поэтому работают и после resize.
-alive_tab_button = pygame.Rect(310, 145, 140, TAB_HEIGHT)
-dead_tab_button = pygame.Rect(450, 145, 140, TAB_HEIGHT)
-fullscreen_button = pygame.Rect(690, 145, 50, TAB_HEIGHT)
-
-
-# ============================================================
-# ОСНОВНОЙ ЦИКЛ
-# ============================================================
-
-running = True
-
-while running:
-
-    clock.tick(FPS)
-
-    passive_food()
-
-    # --------------------------------------------------------
-    # СОБЫТИЯ
-    # --------------------------------------------------------
-
-    for event in pygame.event.get():
-
-        if event.type == pygame.QUIT:
-            running = False
-
-        # Изменение размера окна
-        elif event.type == pygame.VIDEORESIZE and not fullscreen:
-            # Pygame при resize отдаёт новое окно; интерфейс ниже
-            # использует актуальные screen.get_width()/get_height().
-            pass
-
-        # Клавиши
-        elif event.type == pygame.KEYDOWN:
-
-            # F11 — полноэкранный / оконный режим
-            if event.key == pygame.K_F11:
-                toggle_fullscreen()
-
-            # ESC — выйти из fullscreen
-            elif event.key == pygame.K_ESCAPE and fullscreen:
-                toggle_fullscreen()
-
-            # Стрелки — прокрутка списка
-            elif event.key == pygame.K_DOWN:
-                list_scroll += 1
-                clamp_scroll(len(visible_freddies()))
-
-            elif event.key == pygame.K_UP:
-                list_scroll -= 1
-                clamp_scroll(len(visible_freddies()))
-
-        # Колесо мыши — прокрутка списка
-        elif event.type == pygame.MOUSEWHEEL:
-            mouse_pos = pygame.mouse.get_pos()
-
-            if list_rect.collidepoint(mouse_pos):
-                list_scroll -= event.y
-                clamp_scroll(len(visible_freddies()))
-
-        # ЛКМ
-        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-
-            pos = event.pos
-
-            # Клик — поинты
-            if click_button.collidepoint(pos):
-                click()
-
-            # Купить еду
-            elif buy_food_button.collidepoint(pos):
-                buy_food()
-
-            # Создать Fredde
-            elif buy_fredde_button.collidepoint(pos):
-                buy_fredde()
-
-            # Следующий год
-            elif year_button.collidepoint(pos):
-                next_year()
-
-            # Размножение
-            elif reproduce_button.collidepoint(pos):
-                reproduce(
-                    selected_parent1,
-                    selected_parent2
-                )
-
-            # Продажа
-            elif sell_button.collidepoint(pos):
-                sell_fredde(selected_fredde)
-
-            # Вкладка ЖИВЫЕ
-            elif alive_tab_button.collidepoint(pos):
-                current_tab = "alive"
-                list_scroll = 0
-
-            # Вкладка МЁРТВЫЕ
-            elif dead_tab_button.collidepoint(pos):
-                current_tab = "dead"
-                list_scroll = 0
-
-            # Кнопка fullscreen
-            elif fullscreen_button.collidepoint(pos):
-                toggle_fullscreen()
-
-            # Выбор Fredde из текущего списка
-            elif list_rect.collidepoint(pos):
-
-                items = visible_freddies()
-
-                # Область карточек начинается ниже вкладок
-                cards_y = list_rect.y + TAB_HEIGHT
-
-                for visible_i, fred in enumerate(
-                    items[list_scroll:]
-                ):
-
-                    y = cards_y + visible_i * item_h
-
-                    if y > list_rect.bottom:
-                        break
-
-                    rect = pygame.Rect(
-                        list_rect.x,
-                        y,
-                        list_rect.width,
-                        70
-                    )
-
-                    if rect.collidepoint(pos):
-
-                        selected_fredde = fred
-
-                        # Родителями можно выбирать только живых
-                        if fred.alive:
-
-                            if selected_parent1 is None:
-                                selected_parent1 = fred
-                                set_message(
-                                    f"Родитель 1: {fred.name}"
-                                )
-
-                            elif selected_parent2 is None:
-                                selected_parent2 = fred
-                                set_message(
-                                    f"Родитель 2: {fred.name}"
-                                )
-
-                            else:
-                                selected_parent1 = fred
-                                selected_parent2 = None
-                                set_message(
-                                    f"Родитель 1: {fred.name}"
-                                )
-                        else:
-                            set_message(
-                                f"Выбран мёртвый Fredde: {fred.name}"
-                            )
-
-                        break
-
-
-    # --------------------------------------------------------
-    # ФОН
-    # --------------------------------------------------------
-
-    screen.fill(BG)
-
-
-    # ========================================================
-    # ВЕРХНЯЯ ПАНЕЛЬ РЕСУРСОВ
-    # ========================================================
-
-    pygame.draw.rect(
-        screen,
-        PANEL,
-        (0, 0, WIDTH, 90)
-    )
-
-    draw_text(
-        f"🟡 Поинты: {int(points)}",
-        font_medium,
-        YELLOW,
-        30,
-        25
-    )
-
-    draw_text(
-        f"💵 Доллары: ${int(dollars)}",
-        font_medium,
-        GREEN,
-        300,
-        25
-    )
-
-    draw_text(
-        f"🍖 Еда: {int(food)}",
-        font_medium,
-        ORANGE,
-        570,
-        25
-    )
-
-    draw_text(
-        f"🧬 Fredde: {len(alive_freddies())}/{len(freddies)}",
-        font_medium,
-        BLUE,
-        max(760, - 10),
-        25
-    )
-
-    draw_text(
-        f"Год: {game_year}",
-        font_medium,
-        WHITE,
-        max(1050, - 250),
-        25
-    )
-
-
-    # ========================================================
-    # ЛЕВАЯ ПАНЕЛЬ
-    # ========================================================
-
-    pygame.draw.rect(
-        screen,
-        PANEL,
-        (0, 90, 290, HEIGHT - 90)
-    )
-
-    draw_text(
-        "УПРАВЛЕНИЕ",
-        font_big,
-        WHITE,
-        30,
-        105
-    )
-
-    button(
-        click_button,
-        f"КЛИК +{CLICK_POINTS}",
-        YELLOW,
-        font_medium
-    )
-
-    button(
-        buy_food_button,
-        f"Купить еду (${FOOD_PRICE})",
-        ORANGE
-    )
-
-    button(
-        buy_fredde_button,
-        f"Создать Fredde ({FREDDE_FOOD_COST} 🍖)",
-        BLUE
-    )
-
-    button(
-        year_button,
-        "Следующий год",
-        GREEN
-    )
-
-    button(
-        reproduce_button,
-        "Размножить",
-        (140, 90, 200)
-    )
-
-    button(
-        sell_button,
-        f"Продать (+${FREDDE_SELL_PRICE})",
-        RED
-    )
-
-
-    # ========================================================
-    # СПИСОК FREDDE
-    # ========================================================
-
-    screen_w = screen.get_width()
-    screen_h = screen.get_height()
-
-    # Левая панель остаётся фиксированной, список расширяется.
-    list_x = 310
-    info_x = max(770, int(screen_w * 0.60))
-    list_width = max(430, info_x - list_x - 25)
-
-    # Правая панель
-    pygame.draw.rect(
-        screen,
-        PANEL,
-        (
-            info_x,
-            90,
-            screen_w - info_x,
-            screen_h - 90
-        )
-    )
-
-    # Заголовок
-    draw_text(
-        "FREDDIES",
-        font_big,
-        WHITE,
-        list_x,
-        105
-    )
-
-    # Область списка
-    list_rect = pygame.Rect(
-        list_x,
-        145,
-        list_width,
-        screen_h - 215
-    )
-
-    alive_tab_button = pygame.Rect(
-        list_x,
-        145,
-        140,
-        TAB_HEIGHT
-    )
-
-    dead_tab_button = pygame.Rect(
-        list_x + 140,
-        145,
-        140,
-        TAB_HEIGHT
-    )
-
-    fullscreen_button = pygame.Rect(
-        list_x + list_width - 50,
-        145,
-        50,
-        TAB_HEIGHT
-    )
-
-    # Вкладки
-    button(
-        alive_tab_button,
-        f"ЖИВЫЕ ({len(alive_freddies())})",
-        GREEN if current_tab == "alive" else PANEL,
-        font_tiny
-    )
-
-    button(
-        dead_tab_button,
-        f"МЁРТВЫЕ ({len(dead_freddies())})",
-        RED if current_tab == "dead" else PANEL,
-        font_tiny
-    )
-
-    button(
-        fullscreen_button,
-        "⛶",
-        BLUE,
-        font_medium
-    )
-
-    # Список текущей вкладки
-    items = visible_freddies()
-    clamp_scroll(len(items))
-
-    cards_y = list_rect.y + TAB_HEIGHT
-    item_h = 85
-
-    # Скрываем карточки за пределами списка
-    old_clip = screen.get_clip()
-    screen.set_clip(
-        pygame.Rect(
-            list_rect.x,
-            cards_y,
-            list_rect.width,
-            list_rect.bottom - cards_y
-        )
-    )
-
-    for visible_i, fred in enumerate(items[list_scroll:]):
-
-        y = cards_y + visible_i * item_h
-
-        if y > list_rect.bottom:
-            break
-
-        rect = pygame.Rect(
-            list_rect.x,
-            y,
-            list_rect.width,
-            70
-        )
-
-        # Цвет карточки
-        if fred == selected_fredde:
-            color = (65, 70, 85)
+        hovered = self.menuButton.collidepoint(pygame.mouse.get_pos())
+        pygame.draw.rect(self.screen, BLUE if hovered else PANEL_LIGHT, self.menuButton, border_radius=10)
+        self.drawCentered("МЕНЮ", self.menuButton, self.font, WHITE)
+
+        hint = "Q E Z C — ход   Space — пауза   Esc — меню"
+        hintImage = self.fontTiny.render(hint, True, WHITE)
+        hintRect = hintImage.get_rect(bottomleft=(18, HEIGHT - 16)).inflate(18, 10)
+        shade = pygame.Surface(hintRect.size, pygame.SRCALPHA)
+        shade.fill((12, 19, 29, 190))
+        self.screen.blit(shade, hintRect)
+        self.screen.blit(hintImage, hintImage.get_rect(center=hintRect.center))
+
+    def drawPopup(self):
+        self.popupButtons.clear()
+
+        if self.popup == "fred":
+            self.drawFredPopup()
+        elif self.popup == "exit":
+            self.drawExitPopup()
         else:
-            color = PANEL
+            self.drawWorldPopup()
 
-        pygame.draw.rect(
-            screen,
-            color,
-            rect,
-            border_radius=8
-        )
+    def beginPopup(self, width, height, title):
+        self.popupRect = pygame.Rect(0, 0, width, height)
+        self.popupRect.bottomright = (WIDTH - 18, HEIGHT - 18)
+        pygame.draw.rect(self.screen, PANEL, self.popupRect, border_radius=16)
+        pygame.draw.rect(self.screen, (77, 96, 118), self.popupRect, 2, border_radius=16)
+        self.drawText(title, self.popupRect.x + 24, self.popupRect.y + 20, self.fontBig, WHITE)
+        self.drawPopupButton("close", "×", self.popupRect.right - 54, self.popupRect.y + 14, 38, 38)
 
-        # Рамка родителя
-        if fred == selected_parent1:
-            pygame.draw.rect(
-                screen,
-                YELLOW,
-                rect,
-                3,
-                border_radius=8
+    def drawWorldPopup(self):
+        self.beginPopup(470, 625, "Мир")
+        x = self.popupRect.x + 24
+        y = self.popupRect.y + 70
+
+        alive = sum(fred.alive for fred in self.world.freddies)
+        self.drawText(f"Ход: {self.turn}     Живых: {alive}", x, y, self.font, WHITE)
+        y += 34
+
+        canSpawn = False
+        if self.popupCell is None:
+            self.drawText("ПКМ по клетке", x, y, self.fontSmall, MUTED)
+        else:
+            canSpawn = self.terrain.is_walkable(*self.popupCell) and not occupied(self.world, self.popupCell)
+            color = GREEN if canSpawn else RED
+            cell = self.terrain.cell_at(*self.popupCell)
+            biome = cell.biome if cell else "край"
+
+            if self.popupCell in self.terrain.blocked_cells:
+                state = "препятствие"
+            elif occupied(self.world, self.popupCell):
+                state = "занято"
+            else:
+                state = "можно" if canSpawn else "нельзя"
+
+            self.drawText(
+                f"{self.popupCell}   {biome}   {state}",
+                x, y, self.fontSmall, color,
             )
+        y += 40
 
-        elif fred == selected_parent2:
-            pygame.draw.rect(
-                screen,
-                GREEN,
-                rect,
-                3,
-                border_radius=8
-            )
+        self.drawPopupButton("spawn", "Создать Фредди", x, y, 422, 44, disabled=not canSpawn)
+        y += 58
+        self.drawPopupButton("pause", "Продолжить" if self.paused else "Пауза", x, y, 202, 44)
+        self.drawPopupButton("step", "Один ход", x + 220, y, 202, 44)
+        y += 66
 
-        # Спрайт
-        image = get_fredde_image(fred, 60)
+        self.drawText(f"Скорость: {SPEEDS[self.speedIndex]} хода/с", x, y + 10, self.font, WHITE)
+        self.drawPopupButton("slower", "−", x + 300, y, 54, 44)
+        self.drawPopupButton("faster", "+", x + 368, y, 54, 44)
+        y += 66
 
-        if image:
-            screen.blit(
-                image,
-                (rect.x + 5, rect.y + 5)
-            )
+        self.drawPopupButton("save", "Сохранить", x, y, 202, 44)
+        self.drawPopupButton("load", "Загрузить последний", x + 220, y, 202, 44)
+        y += 58
+        self.drawPopupButton("center", "К центру карты", x, y, 202, 44)
+        self.drawPopupButton("clearParents", "Сбросить родителей", x + 220, y, 202, 44)
+        y += 58
+        self.drawPopupButton("exit", "Выйти", x, y, 422, 44, danger=True)
 
-        # Имя
-        draw_text(
-            fred.name,
-            font_medium,
-            WHITE,
-            rect.x + 75,
-            rect.y + 8
-        )
+    def drawExitPopup(self):
+        self.beginPopup(390, 190, "Выйти из игры?")
+        x = self.popupRect.x + 24
+        y = self.popupRect.bottom - 68
+        self.drawPopupButton("exitNo", "Нет", x, y, 162, 44)
+        self.drawPopupButton("exitYes", "Да", x + 180, y, 162, 44, danger=True)
 
-        # Информация
-        status = "ЖИВ" if fred.alive else "МЁРТВ"
+    def drawFredPopup(self):
+        fred = self.popupFred
+        if fred is None:
+            self.closePopup()
+            return
 
-        draw_text(
-            f"{status} | Возраст: {fred.age} | "
-            f"Gen: {fred.generation}",
-            font_tiny,
-            GRAY,
-            rect.x + 75,
-            rect.y + 38
-        )
+        self.beginPopup(520, 655, "Фредди")
+        x = self.popupRect.x + 24
+        y = self.popupRect.y + 68
 
-    screen.set_clip(old_clip)
+        image = self.fredSurface(fred, 105)
+        self.screen.blit(image, image.get_rect(topleft=(x, y)))
+        self.drawText(fred.name, x + 125, y + 4, self.fontBig, YELLOW)
+        self.drawText("Жив" if fred.alive else "Мёртв", x + 125, y + 42, self.font, GREEN if fred.alive else RED)
+        self.drawText(f"Позиция: {fred.position}", x + 125, y + 72, self.fontSmall, WHITE)
+        y += 125
 
-    # Подсказка о прокрутке
-    if len(items) > 1:
-        draw_text(
-            "Колесо мыши / ↑ ↓ — прокрутка",
-            font_tiny,
-            GRAY,
-            list_x,
-            screen_h - 42
-        )
-
-
-    # ========================================================
-    # ИНФОРМАЦИЯ СПРАВА
-    # ========================================================
-
-    draw_text(
-        "ИНФОРМАЦИЯ",
-        font_big,
-        WHITE,
-        info_x + 25,
-        110
-    )
-
-    if selected_fredde is not None:
-
-        fred = selected_fredde
-
-        y = 165
-
-        draw_text(
-            fred.name,
-            font_big,
-            YELLOW,
-            info_x + 25,
-            y
-        )
-
-        y += 55
-
-        information = [
-            f"Статус: {'жив' if fred.alive else 'мёртв'}",
-            f"Возраст: {fred.age}",
+        parents = ", ".join(parent.name for parent in fred.parents) or "нет"
+        left = [
+            f"Возраст: {fred.age:.1f}",
             f"Пол: {fred.gender}",
             f"Поколение: {fred.generation}",
             f"GenID: {fred.genid}",
+        ]
+        right = [
             f"GenDom: {fred.gendom}",
             f"Мутация: {fred.mutrate}%",
-            f"Редкость: {fred.rarity}",
-            f"Цвет: {fred.color}",
+            f"Награда: {getattr(fred, 'reward', 0)}",
+            f"Секс: {getattr(fred, 'successful_sex', 0)}",
         ]
+        for number, text in enumerate(left):
+            self.drawText(text, x, y + number * 27, self.fontSmall, WHITE)
+        for number, text in enumerate(right):
+            self.drawText(text, x + 245, y + number * 27, self.fontSmall, WHITE)
+        y += 116
+        sleep = "да" if getattr(fred, "hibernation", False) else "нет"
+        self.drawText(f"Сон: {sleep}", x, y, self.fontSmall, BLUE if sleep == "да" else MUTED)
+        self.drawText(f"Родители: {parents}", x, y + 27, self.fontSmall, MUTED)
+        y += 68
 
-        for line in information:
+        self.drawText("Передвинуть", x, y, self.font, WHITE)
+        y += 34
+        self.drawPopupButton("left_up", "Q   ↖", x, y, 227, 42, disabled=not fred.alive)
+        self.drawPopupButton("right_up", "E   ↗", x + 245, y, 227, 42, disabled=not fred.alive)
+        y += 52
+        self.drawPopupButton("left_down", "Z   ↙", x, y, 227, 42, disabled=not fred.alive)
+        self.drawPopupButton("right_down", "C   ↘", x + 245, y, 227, 42, disabled=not fred.alive)
+        y += 66
 
-            draw_text(
-                line,
-                font_small,
-                WHITE,
-                info_x + 25,
-                y
-            )
+        self.drawPopupButton("parent1", "Родитель 1", x, y, 227, 42, disabled=not fred.alive)
+        self.drawPopupButton("parent2", "Родитель 2", x + 245, y, 227, 42, disabled=not fred.alive)
+        y += 52
+        ready = self.parent1 is not None and self.parent2 is not None
+        self.drawPopupButton("breed", "Размножить", x, y, 472, 46, danger=True, disabled=not ready)
 
-            y += 30
-
-        # Родители
-        y += 15
-
-        draw_text(
-            "Родители:",
-            font_medium,
-            BLUE,
-            info_x + 25,
-            y
-        )
-
-        y += 35
-
-        if fred.parents:
-
-            for parent in fred.parents:
-
-                draw_text(
-                    parent.name,
-                    font_small,
-                    WHITE,
-                    info_x + 35,
-                    y
-                )
-
-                y += 25
-
+    def drawPopupButton(self, action, text, x, y, width, height, danger=False, disabled=False):
+        rectangle = pygame.Rect(x, y, width, height)
+        if not disabled:
+            self.popupButtons[action] = rectangle
+        hovered = rectangle.collidepoint(pygame.mouse.get_pos()) and not disabled
+        if disabled:
+            color = (42, 48, 57)
+            textColor = (102, 111, 123)
+        elif danger:
+            color = RED if hovered else (130, 51, 62)
+            textColor = WHITE
         else:
+            color = BLUE if hovered else PANEL_LIGHT
+            textColor = WHITE
+        pygame.draw.rect(self.screen, color, rectangle, border_radius=9)
+        self.drawCentered(text, rectangle, self.fontSmall, textColor)
 
-            draw_text(
-                "Нет данных",
-                font_small,
-                GRAY,
-                info_x + 35,
-                y
+    def drawCentered(self, text, rectangle, font, color):
+        image = font.render(str(text), True, color)
+        self.screen.blit(image, image.get_rect(center=rectangle.center))
+
+    def drawText(self, text, x, y, font, color):
+        self.screen.blit(font.render(str(text), True, color), (round(x), round(y)))
+
+    def showMessage(self, text, color=WHITE):
+        self.message = str(text)
+        self.messageColor = color
+        self.messageUntil = pygame.time.get_ticks() + 3500
+
+    def drawMessage(self):
+        if not self.message or pygame.time.get_ticks() > self.messageUntil:
+            return
+        image = self.font.render(self.message, True, self.messageColor)
+        rectangle = image.get_rect(midbottom=(WIDTH // 2, HEIGHT - 35)).inflate(30, 18)
+        pygame.draw.rect(self.screen, PANEL, rectangle, border_radius=10)
+        pygame.draw.rect(self.screen, self.messageColor, rectangle, 1, border_radius=10)
+        self.screen.blit(image, image.get_rect(center=rectangle.center))
+
+    def saveGame(self):
+        try:
+            SAVES_DIR.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            path = SAVES_DIR / f"save_{stamp}.json"
+            number = 2
+            while path.exists():
+                path = SAVES_DIR / f"save_{stamp}_{number}.json"
+                number += 1
+
+            fredList = list(self.world.freddies)
+            indexes = {fred: number for number, fred in enumerate(fredList)}
+            data = {
+                "version": 1,
+                "saved_at": datetime.now().isoformat(timespec="seconds"),
+                "terrain_seed": self.terrain.seed,
+                "turn": self.turn,
+                "speed": SPEEDS[self.speedIndex],
+                "paused": self.paused,
+                "camera": {
+                    "x": self.terrain.camera_x,
+                    "y": self.terrain.camera_y,
+                    "zoom": self.terrain.zoom,
+                },
+                "parent1": indexes.get(self.parent1),
+                "parent2": indexes.get(self.parent2),
+                "selected": indexes.get(self.selectedFred),
+                "freddies": [self.fredData(fred, indexes) for fred in fredList],
+            }
+
+            temporary = path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            temporary.replace(path)
+            self.showMessage(f"Сохранено: {path.name}", GREEN)
+            return path
+        except Exception as error:
+            self.showMessage(f"Ошибка сохранения: {error}", RED)
+            return None
+
+    def fredData(self, fred, indexes):
+        return {
+            "name": fred.name,
+            "alive": fred.alive,
+            "age": fred.age,
+            "gender": fred.gender,
+            "genid": fred.genid,
+            "gendom": fred.gendom,
+            "mutrate": fred.mutrate,
+            "rarity": fred.rarity,
+            "generation": fred.generation,
+            "color": list(fred.color),
+            "eye": fred.eye,
+            "hatAcs": fred.hatAcs,
+            "faceAcs": fred.faceAcs,
+            "eyeAcs": fred.eyeAcs,
+            "bodyPattern": fred.bodyPattern,
+            "eyelash": fred.eyelash,
+            "position": list(fred.position) if fred.position is not None else None,
+            "brain": list(fred.brain),
+            "hibernation": fred.hibernation,
+            "reward": getattr(fred, "reward", 0),
+            "successful_sex": getattr(fred, "successful_sex", 0),
+            "parents": [indexes[parent] for parent in fred.parents if parent in indexes],
+        }
+
+    def loadLatest(self):
+        saves = sorted(SAVES_DIR.glob("save_*.json")) if SAVES_DIR.exists() else []
+        if not saves:
+            self.showMessage("Сохранений пока нет", RED)
+            return False
+        return self.loadGame(saves[-1])
+
+    def loadGame(self, path):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            records = data["freddies"]
+            self.world.freddies.clear()
+            freddies.clear()
+            self.terrain.regenerate(int(data["terrain_seed"]))
+            self.world.terrain = self.terrain
+            created = []
+
+            for record in records:
+                fred = Fredde(
+                    name=record["name"], paddock=self.world, age=record["age"],
+                    gender=record["gender"], genid=record["genid"],
+                    gendom=record["gendom"], mutrate=record["mutrate"],
+                    rarity=record["rarity"], parents=[], generation=record["generation"],
+                    color=record["color"], eye=record["eye"], hatAcs=record["hatAcs"],
+                    faceAcs=record["faceAcs"], eyeAcs=record["eyeAcs"],
+                    bodyPattern=record["bodyPattern"], eyelash=record["eyelash"],
+                )
+                fred.alive = record["alive"]
+                fred.position = record["position"]
+                brain = record.get("brain", [])
+                fred.brain = brain if len(brain) == BRAIN_SIZE else createBrain()
+                fred.hibernation = record.get("hibernation", False)
+                fred.reward = record.get("reward", 0)
+                fred.successful_sex = record.get("successful_sex", 0)
+                created.append(fred)
+
+            for fred, record in zip(created, records):
+                fred.parents = [created[number] for number in record.get("parents", [])]
+
+            def savedFred(name):
+                number = data.get(name)
+                return created[number] if isinstance(number, int) and number < len(created) else None
+
+            self.parent1 = savedFred("parent1")
+            self.parent2 = savedFred("parent2")
+            self.selectedFred = savedFred("selected")
+            self.turn = int(data.get("turn", 0))
+            savedSpeed = float(data.get("speed", 1))
+            self.speedIndex = min(
+                range(len(SPEEDS)),
+                key=lambda number: abs(SPEEDS[number] - savedSpeed),
             )
+            self.paused = bool(data.get("paused", True))
 
-    else:
+            camera = data.get("camera", {})
+            self.terrain.camera_x = float(camera.get("x", self.terrain.camera_x))
+            self.terrain.camera_y = float(camera.get("y", self.terrain.camera_y))
+            self.terrain.zoom = max(MIN_ZOOM, min(MAX_ZOOM, float(camera.get("zoom", self.terrain.zoom))))
+            self.terrain.scaled_assets_zoom = None
+            self.terrain.update_scaled_assets()
 
-        draw_text(
-            "Выбери Fredde",
-            font_medium,
-            GRAY,
-            info_x + 25,
-            170
-        )
-
-
-    # ========================================================
-    # РОДИТЕЛИ
-    # ========================================================
-
-    draw_text(
-        "РОДИТЕЛИ",
-        font_medium,
-        WHITE,
-        info_x + 25,
-        min(500, screen_h - 190)
-    )
-
-    draw_text(
-        f"1: {selected_parent1.name if selected_parent1 else '-'}",
-        font_small,
-        YELLOW,
-        info_x + 25,
-        min(535, screen_h - 155)
-    )
-
-    draw_text(
-        f"2: {selected_parent2.name if selected_parent2 else '-'}",
-        font_small,
-        GREEN,
-        info_x + 25,
-        min(565, screen_h - 125)
-    )
+            self.accumulator = 0
+            self.fredCache.clear()
+            self.fredOriginalCache.clear()
+            self.closePopup()
+            self.showMessage(f"Загружено: {path.name}", GREEN)
+            return True
+        except Exception as error:
+            self.showMessage(f"Ошибка загрузки: {error}", RED)
+            return False
 
 
-    # ========================================================
-    # СООБЩЕНИЕ
-    # ========================================================
-
-    message_rect = pygame.Rect(
-        300,
-        screen_h - 60,
-        max(400, info_x - 320),
-        40
-    )
-
-    pygame.draw.rect(
-        screen,
-        (30, 32, 36),
-        message_rect,
-        border_radius=5
-    )
-
-    draw_text(
-        message,
-        font_small,
-        WHITE,
-        message_rect.x + 15,
-        message_rect.y + 10
-    )
+def parseArguments():
+    parser = argparse.ArgumentParser(description="Fredde World")
+    parser.add_argument("--seed", type=int, help="Seed новой карты")
+    parser.add_argument("--spawn", type=int, default=20, help="Сколько Фредди создать")
+    parser.add_argument("--speed", type=float, default=1, help="Ходов в секунду")
+    parser.add_argument("--paused", action="store_true", help="Начать с паузы")
+    parser.add_argument("--load", dest="loadPath", help="Загрузить JSON-сейв")
+    parser.add_argument("--latest", action="store_true", help="Загрузить последний сейв")
+    return parser.parse_args()
 
 
-    pygame.display.flip()
+def main():
+    Game(parseArguments()).run()
 
 
-pygame.quit()
-sys.exit()
+if __name__ == "__main__":
+    main()
